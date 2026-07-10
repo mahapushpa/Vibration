@@ -1,0 +1,42 @@
+it is also side effect of refactoring.
+1. When session is on and press the quit button.
+2. Sent off command to remote, set cmd_waiting = True and returned True.
+3. Now after few mseconds, response come with suitable reply etc, executed from
+   data_capture method as self.cmd_handler.receive_response(response).
+   and executed as below with reply to caller (here data_capture which nothing to do with it. It received data_capture
+   and send to response function to process it. In this case both are blind for quit command.
+   
+    # Check reply type in response header
+    if response[CMD_TYPE_IDX] == REPLY_TYPES.get('CMD_NAK'):
+        logging.error("CMD_NAK received. Either CRC failure or unknown command at receiver.")
+        return response
+
+    elif response[CMD_TYPE_IDX] == REPLY_TYPES.get('CMD_ACK'):
+        logging.info("CMD_ACK received. Command executed successfully")
+        
+        if self.cmd_type == "CMD_SET":
+            # For SET command, no further data to parse.
+            return (REPLY_TYPES.get('CMD_ACK'), self.module_name, self.param_name, None)
+        else:
+            # For GET command, extract the value from response data.
+            return self.parse_response(response[CMD_DATA_IDX:])
+
+After creating noise in log or terminal and quit function continue to process the exit. It maybe 
+faster also before reply come, closes the serial port.
+
+What is needed to do:
+1. Some how, response function should know to update the user about message (here was quit button)
+2. After receiving response or time, only quit shoud continue further.
+3. Here cmd_waiting == True very useful information, which helps data_capture to call data insert or response function.
+4. Same can be used to solve the dead lock.
+
+In non-session mode, in send_command function itself, the maps_com.receive_rply called and 
+self.receive_response(response) execute without break and returned reply.
+
+Now to break this particular case, maybe not good solution but can be done like.
+For two cases, quit and control+c cases - first we clear the session flag. So send and receive will be done seamless in 
+one call. 
+
+The changes in this function created the below message while using the quit button in the session on, 
+[INFO] Command sent successfully, waiting for response...   
+[WARNING] Invalid response type: <class 'bool'>, value: True

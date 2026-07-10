@@ -1,0 +1,10 @@
+2025-12-08 16:03:38,870 | INFO     | sys_config.configure_logging:82 | Logging initialized: level = INFO, console = False, csv = False
+2025-12-08 16:03:38,870 | INFO     | sys_config.configure_plotting:100 | Matplotlib backend in use: TkAgg
+2025-12-08 16:03:38,870 | INFO     | sys_config.configure_plotting:109 | Global exception handler enabled
+2025-12-08 16:03:38,886 | INFO     | sys_config.load:298 | sys_config.ini loaded (latest_used_on)
+2025-12-08 16:03:38,886 | INFO     | sys_config.sys_config_init:465 | Rule-based INI checks: 25 passed, 0 failed, of 25 total
+2025-12-08 16:03:39,399 | ERROR    | utils_helpers.safe_log:57 | No valid serial device found.
+2025-12-08 16:03:39,399 | INFO     | ProductionToolV1.__init__:67 | Connected to -> None
+2025-12-08 16:03:39,399 | INFO     | utils_helpers.log_info_msg:74 | CMD_TABLE key validation passed.
+2025-12-08 16:03:39,503 | INFO     | ProductionToolV1.run:114 | Application started...
+2025-12-08 16:07:34,855 | INFO     | ProductionToolV1.stop:127 | Application closed successfully.

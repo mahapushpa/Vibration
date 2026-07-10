@@ -1,0 +1,48 @@
+2026-03-05 18:57:37,723 | INFO     | sys_config.configure_logging:82 | Logging initialized: level = INFO, console = False, csv = False
+2026-03-05 18:57:37,723 | INFO     | sys_config.configure_plotting:100 | Matplotlib backend in use: TkAgg
+2026-03-05 18:57:37,723 | INFO     | sys_config.configure_plotting:109 | Global exception handler enabled
+2026-03-05 18:57:37,723 | INFO     | sys_config.load:298 | sys_config.ini loaded (latest_used_on)
+2026-03-05 18:57:37,723 | INFO     | sys_config.sys_config_init:465 | Rule-based INI checks: 25 passed, 0 failed, of 25 total
+2026-03-05 18:57:38,940 | INFO     | utils_helpers.safe_log:62 | Serial Port COM4 opened @112500
+2026-03-05 18:57:38,940 | INFO     | utils_helpers.safe_log:62 | Connected to -> serial_port
+2026-03-05 18:57:38,940 | INFO     | utils_helpers.log_info_msg:74 | CMD_TABLE key validation passed.
+2026-03-05 18:57:38,940 | INFO     | sync_remote.sync_to_remote:9 | Synchronizing with Remote...
+2026-03-05 18:57:38,940 | INFO     | utils_helpers.safe_log:62 | [RX] Reading adc_srate -> ADC -> SRATE
+2026-03-05 18:57:38,956 | INFO     | cmd_remote.send_command:346 | Command Sent   : 1404090000004468414443055352415445
+2026-03-05 18:57:38,957 | INFO     | cmd_remote.rcv_response:386 | Reply Received : 14000B0000002A0C4144430553524154450004
+2026-03-05 18:57:38,957 | INFO     | cmd_remote.rcv_response:408 | CMD_ACK received. Command executed successfully
+2026-03-05 18:57:38,957 | INFO     | utils_helpers.safe_log:62 | ADC->SRATE->1024 read successfully
+2026-03-05 18:57:38,957 | INFO     | utils_helpers.safe_log:62 | [RX] Reading adc_channels -> ADC -> CHANNEL
+2026-03-05 18:57:38,957 | INFO     | cmd_remote.send_command:346 | Command Sent   : 14040B0000002C85414443074348414E4E454C
+2026-03-05 18:57:38,958 | INFO     | cmd_remote.rcv_response:386 | Reply Received : 14000C000000075D414443074348414E4E454C02
+2026-03-05 18:57:38,958 | INFO     | cmd_remote.rcv_response:408 | CMD_ACK received. Command executed successfully
+2026-03-05 18:57:38,958 | INFO     | utils_helpers.safe_log:62 | ADC->CHANNEL->2 read successfully
+2026-03-05 18:57:38,958 | INFO     | utils_helpers.safe_log:62 | [RX] Reading adc_fragment -> ADC -> FRAGMENT
+2026-03-05 18:57:38,958 | INFO     | cmd_remote.send_command:346 | Command Sent   : 14040C00000001D441444308465241474D454E54
+2026-03-05 18:57:38,958 | INFO     | cmd_remote.rcv_response:386 | Reply Received : 14000E0000006FB041444308465241474D454E540004
+2026-03-05 18:57:38,958 | INFO     | cmd_remote.rcv_response:408 | CMD_ACK received. Command executed successfully
+2026-03-05 18:57:38,958 | INFO     | utils_helpers.safe_log:62 | ADC->FRAGMENT->1024 read successfully
+2026-03-05 18:57:39,066 | INFO     | utils_helpers.safe_log:62 | System initialised with :
+2026-03-05 18:57:39,066 | INFO     | utils_helpers.safe_log:62 | Input Channels : 2
+2026-03-05 18:57:39,066 | INFO     | utils_helpers.safe_log:62 | Sampling Rate  : 1024 Hz
+2026-03-05 18:57:39,137 | INFO     | utils_helpers.safe_log:62 | Input Signal unit : CNT
+2026-03-05 18:57:39,246 | INFO     | VibMScopeV1.run:155 | Application started...
+2026-03-05 18:57:46,007 | INFO     | utils_helpers.safe_log:62 | [TX] sys_session->SYS->SESSION = 1
+2026-03-05 18:57:46,007 | INFO     | cmd_remote.send_command:346 | Command Sent   : 14030C000000D5B35359530753455353494F4E01
+2026-03-05 18:57:46,007 | ERROR    | utils_helpers.raise_key_error_msg:89 | [RECV] Unexpected header id 0x{response[0]:02X} in resposne : {response.hex().upper()}
+2026-03-05 18:57:46,007 | ERROR    | cmd_remote.set_remote_value:260 | [SET_CMD] Exception during remote set of set parameter command (SESSION): Invalid or short response while setting set parameter command.
+2026-03-05 18:57:46,007 | INFO     | utils_helpers.safe_log:62 | Successfully written sys_session
+2026-03-05 18:57:46,007 | INFO     | maps_class.send_session_cmd:451 | [CMD] Send Session On command.
+2026-03-05 18:57:46,007 | INFO     | utils_helpers.safe_log:62 | Session started.
+2026-03-05 18:57:46,007 | INFO     | serial_comm.start:30 | Serial port thread started.
+2026-03-05 18:57:46,007 | INFO     | serial_comm.run:75 | Serial thread started.
+2026-03-05 18:58:43,912 | INFO     | utils_helpers.safe_log:62 | [TX] sys_session->SYS->SESSION = 0
+2026-03-05 18:58:43,912 | INFO     | cmd_remote.send_command:346 | Command Sent   : 14030C000000D5B35359530753455353494F4E00
+2026-03-05 18:58:43,928 | INFO     | cmd_remote.rcv_response:386 | Reply Received : 14000B0000002A0C5359530753455353494F4E
+2026-03-05 18:58:43,928 | INFO     | cmd_remote.rcv_response:408 | CMD_ACK received. Command executed successfully
+2026-03-05 18:58:43,928 | INFO     | utils_helpers.safe_log:62 | Successfully written sys_session
+2026-03-05 18:58:43,928 | INFO     | maps_class.send_session_cmd:451 | [CMD] Send Session Off command.
+2026-03-05 18:58:43,928 | INFO     | utils_helpers.safe_log:62 | Session stopped.
+2026-03-05 18:58:43,928 | INFO     | serial_comm.stop:51 | Serial port thread stopped.
+2026-03-05 18:58:43,928 | INFO     | utils_helpers.safe_log:62 | Serial port closed.
+2026-03-05 18:58:43,928 | INFO     | utils_helpers.safe_log:62 | Application Closed.

@@ -1,0 +1,79 @@
+
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{times}
+
+\title{Transfer Function Analysis and VibMScope Framework}
+
+\author{\IEEEauthorblockN{Author Name(s)}
+\IEEEauthorblockA{Affiliation\\ Email}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper presents a unified framework for vibration transmissibility analysis using the VibMScope system. It integrates simulation, live capture, FFT-based analysis, and professional reporting.
+\end{abstract}
+
+\section{Overview}
+This document presents a complete framework for simulating, capturing, and analyzing vibration transmissibility using a modular Python-based system named VibMScope. The framework includes real-time support, sweep simulation, FFT-based transmissibility extraction, and professional report generation including metadata, plots, and summary tables.
+
+\section{Objective}
+To develop a consistent and extensible system for analyzing transmissibility (output/input vs frequency) in vibration systems, with support for:
+\begin{itemize}
+\item Simulation mode (chirp/sweep)
+\item Live sensor capture (remote streaming)
+\item FFT-based analysis (amplitude and phase)
+\item Professional output (.pdf, .csv, .txt, .npz)
+\item Accurate metadata recording
+\end{itemize}
+
+\section{Architecture Summary}
+The architecture includes components for simulation, post-processing, GUI integration, and metadata export. Data is stored in .npz format with full traceability.
+
+\section{Methodology}
+The system uses FFT-based amplitude ratio for transmissibility extraction, rejecting the less robust time-domain ratio method. Frequency-domain comparison ensures better accuracy.
+
+\section{Transmissibility vs Transfer Function}
+Case A (Force $\rightarrow$ Acceleration):
+\begin{equation}
+TF_A(f) = \sqrt{\frac{1 + (2\zeta f / f_n)^2}{(1 - (f / f_n)^2)^2 + (2\zeta f / f_n)^2}}
+\end{equation}
+
+Case B (Displacement input/output):
+\begin{equation}
+T(f) = \frac{1}{\sqrt{(1 - (f / f_n)^2)^2 + (2\zeta f / f_n)^2}}
+\end{equation}
+
+\section{System Parameter Estimation}
+Parameters like damping ratio, natural frequency, and system order are extracted via model fitting and peak-counting. Line styles are used instead of colors to ensure print-safe legend.
+
+\section{Output Formats}
+\begin{itemize}
+\item \texttt{.npz} for raw signals + metadata
+\item \texttt{.txt} for aligned field summary
+\item \texttt{.pdf} for TF plots and embedded metadata
+\item \texttt{.csv} optionally for TF curve
+\end{itemize}
+
+\section{Metadata and Reproducibility}
+Each output contains data capture info, system info, processing method, and tool version --- supporting traceability and repeatability.
+
+\section{GUI Integration (VibMScope)}
+The GUI is implemented using Tkinter and Matplotlib, includes responsive dual-pane display, DPI awareness, and shortcut keys.
+
+\section{Design Strengths}
+\begin{itemize}
+\item Modular, Extensible
+\item FFT-only method for robustness
+\item Monochrome-safe output
+\item Unified handling of live and simulated modes
+\end{itemize}
+
+\section{Publication Readiness}
+This framework is suitable for IEEE conference papers, technical white papers, or internal engineering documentation. Ready for LaTeX and Word export.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+\end{document}

@@ -16,25 +16,69 @@ Main Classes:
 # Imports
 #-------------------------------------------------------------------------------
 import os
+import re
 import logging
 import tkinter as tk
 from datetime  import datetime
 from typing    import Any, Dict
 from tkinter   import ttk, messagebox, filedialog, simpledialog
 
-from productiontool.prd_gui_meta   import *
-from common.utils.gui_utils    import *
-from common.utils.utils_helpers import *
-from common.utils.config_io    import ConfigIO
-from productiontool.prd_features   import IS_ENABLED
-from common.core.product_meta  import ProductMeta
-from common.modules.cmd_remote import CMD_TABLE, MODULE_ALIASES
-from common.core.sys_config    import set_sys_value
+from vibmtool.prd_gui_meta   import *
+from vibmshared.utils.gui_utils    import *
+from vibmshared.utils.utils_helpers import *
+from vibmshared.utils.config_io    import ConfigIO
+from vibmtool.prd_features   import IS_ENABLED
+from vibmshared.core.product_meta  import ProductMeta
+from vibmshared.modules.cmd_remote import CMD_TABLE, MODULE_ALIASES
+from vibmshared.modules.cmd_helpers import write_single_param_direct, read_single_param_direct
+from vibmshared.core.sys_config    import set_sys_value
 
 #-------------------------------------------------------------------------------
 # Validation constraints for serial number
 #-------------------------------------------------------------------------------
 SERIAL_RANGE = CMD_TABLE["SYS"]["SER_NO"].get("range", (0, 9999))
+
+#-------------------------------------------------------------------------------
+# Filename helpers
+#-------------------------------------------------------------------------------
+# client/order_id are free-text Entry fields (see prd_gui_meta.META_DEFINITIONS)
+# with no character restriction, and both are woven into generated filenames
+# (device_/master_/build_/summary_ *). Underscores are intentionally still
+# allowed in client/order — restricting operator input isn't the fix here.
+# Two separate concerns instead:
+#   1) filesystem-illegal characters (path separators etc.) must still be
+#      stripped, or a client/order value could break file creation outright.
+#   2) any code that later re-parses a generated filename must not assume a
+#      fixed number of "_"-separated fields, since client/order may contain
+#      "_" themselves — see DEVICE_FILENAME_RE below.
+_FILENAME_ILLEGAL_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+def _sanitize_filename_part(text: str) -> str:
+    """Strip characters that are illegal in filenames on Windows/POSIX.
+    Underscores are deliberately left untouched — see module note above."""
+    cleaned = _FILENAME_ILLEGAL_CHARS_RE.sub("-", str(text)).strip(" .")
+    return cleaned or "unknown"
+
+# Matches: device_<anything>_<digits>.ini — the trailing "_<digits>" group is
+# the serial number, greedily anchored so it's found correctly no matter how
+# many underscores appear earlier in <anything> (i.e. inside client/order).
+DEVICE_FILENAME_RE = re.compile(r'^device_.*_(\d+)\.ini$', re.IGNORECASE)
+
+def _serial_sort_key(sn):
+    """Numeric serials sort numerically; non-numeric keys sort after them,
+    alphabetically — one bad hand-edited key no longer aborts the whole
+    summary load/export."""
+    s = str(sn).strip()
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
+
+def _confirm_overwrite(path) -> bool:
+    """Ask before overwriting an existing export/report file — save_to_ini()
+    already asks; the fixed-name exports silently clobbered."""
+    if os.path.exists(path):
+        return messagebox.askyesno(
+            "Overwrite File?",
+            f"A file already exists:\n{os.path.basename(path)}\n\nDo you want to overwrite it?")
+    return True
 
 #-------------------------------------------------------------------------------
 # Class: InputManager
@@ -232,13 +276,13 @@ class InputManager:
                 self.inputs[section][flat_key] = gui_def.get("default", "")
 
     # ------ MASTER LOAD -------------------------------------------------------
-    def load_from_master(self, full_path: str) -> None:
+    def load_from_master(self, full_path: str) -> bool:
         # Ask for serial number to build new device config
         self.serial_no = simpledialog.askstring("Serial Number", "Enter Device Serial Number:")
 
         if not self.serial_no:
             self.log_handler.log("No serial number entered. Operation cancelled.", tag="warn")
-            return
+            return False
 
         try:
             self.serial_no = int(self.serial_no.strip())
@@ -247,7 +291,7 @@ class InputManager:
 
         except ValueError:
             messagebox.showerror("Invalid Input", f"Serial number must be an integer in range {SERIAL_RANGE}")
-            return
+            return False
 
         try:
             self.source = full_path # needed to save back device list
@@ -269,11 +313,12 @@ class InputManager:
 
             self.inputs["client_info"]['created_on'] = datetime.now().strftime("%d %b %Y")
             self.inputs['client_info']['source'] = self.path_handler.get_file_name_only(full_path)
+            return True
 
         except Exception as e:
             self.log_handler.log(f"Error loading Master config: {e}", tag="error")
             messagebox.showerror("Error", f"Failed to load Master config: {e}")
-            return
+            return False
                 
     # ------ INI LOAD ----------------------------------------------------------
     def load_from_ini(self, full_path: str) -> None:
@@ -282,21 +327,44 @@ class InputManager:
         
         # needed to save back device list, if changed to new serial number
         if self.setup_mode == "device":
-            file_name   = self.inputs["client_info"].get('source', {})
-            self.source = os.path.join(self.config_dir, file_name)
-            self.master_inputs = cfg.load_file(self.source) 
+            # 'source' is the master INI this device was generated from. It may
+            # be absent/blank (the old default was a dict, which crashed
+            # os.path.join); degrade gracefully so device edit still opens.
+            file_name = self.inputs.get("client_info", {}).get('source', "")
+            if not file_name:
+                self.log_handler.log(
+                    "Device INI has no 'source' (master) reference; "
+                    "serial-usage won't be marked back to a master.", tag="warn")
+                self.source = None
+                self.master_inputs = {}
+            else:
+                self.source = os.path.join(self.config_dir, file_name)
+                if os.path.exists(self.source):
+                    self.master_inputs = cfg.load_file(self.source)
+                else:
+                    self.log_handler.log(
+                        f"Master file '{file_name}' referenced by this device INI "
+                        f"was not found; serial-usage won't be marked back.", tag="warn")
+                    self.master_inputs = {}
 
     # ----- INI SAVE -----------------------------------------------------------
     def save_to_ini(self) -> None:
          # Save to file
-        client = self.inputs["client_info"].get('client', 'unknown')
-        order  = self.inputs["client_info"].get('order_id', '0000')
+        # str(): ConfigIO literal_eval turns purely-numeric client/order into
+        # int (and "True" into bool); .lower()/.title() then crash ([T6]).
+        client = str(self.inputs["client_info"].get('client', 'unknown'))
+        order  = str(self.inputs["client_info"].get('order_id', '0000'))
+
+        # Sanitize only for filename use — the unsanitized values are still
+        # what gets written into the INI content itself.
+        fname_client = _sanitize_filename_part(client.lower())
+        fname_order  = _sanitize_filename_part(order)
 
         if self.setup_mode == "device":
             serial_no = self.inputs["system_info"].get('sys_ser_no', '0000')
-            file_name = f"{self.setup_mode}_{client.lower()}_{order}_{serial_no}.ini"
+            file_name = f"{self.setup_mode}_{fname_client}_{fname_order}_{serial_no}.ini"
         else:
-            file_name = f"{self.setup_mode}_{client.lower()}_{order}.ini"
+            file_name = f"{self.setup_mode}_{fname_client}_{fname_order}.ini"
             
         full_path = os.path.join(self.config_dir, file_name)
 
@@ -346,15 +414,34 @@ class InputManager:
 
     # -- DEVICE LIST helper (serial numbers) -----------------------------------
     def build_device_list(self) -> None:
+        """Regenerate the device_info register from base_serial/total_qty,
+        MERGING with the existing register ([T1], DECIDED 2026-07-16):
+        - serials still in range keep their existing "used, <date>" value;
+        - "used" entries that fall OUT of a shrunk range are KEPT (build
+          history is never silently discarded);
+        - only out-of-range "unused" entries are dropped.
+        Previously this cleared the whole section, so editing a master reset
+        every built device to "unused" and Summary flagged them YES[Error]."""
         try:
             base  = int(self.inputs["client_info"].get("base_serial", 0))
             total = int(self.inputs["client_info"].get("total_qty", 0))
         except ValueError:
             raise ValueError("Base serial / total units must be integers")
 
-        self.inputs["device_info"].clear()
+        old = self.inputs.get("device_info", {}) or {}
+        new_list = {}
         for sn in range(base, base + total):
-            self.inputs["device_info"][str(sn)] = "unused"
+            key  = str(sn)
+            prev = str(old.get(key, "unused"))
+            new_list[key] = prev if prev.startswith("used") else "unused"
+
+        # keep out-of-range USED entries (history), drop out-of-range unused
+        for key, val in old.items():
+            key = str(key)
+            if key not in new_list and str(val).startswith("used"):
+                new_list[key] = val
+
+        self.inputs["device_info"] = new_list
 
     # -- Mark used in Master File of serial number -----------------------------
     def mark_serial_used_in_master(self) -> None:
@@ -366,7 +453,10 @@ class InputManager:
         if "device_info" not in self.master_inputs:
             self.master_inputs["device_info"] = {}
 
-        serial = self.inputs.get("system_info", {}).get("sys_ser_no")
+        raw = self.inputs.get("system_info", {}).get("sys_ser_no")
+        serial = "" if raw is None else str(raw).strip()
+        if serial.isdigit():
+            serial = str(int(serial))   # normalize " 105"/"0105" -> "105"
         if not serial:
             self.log_handler.log("Serial number missing, skipping device_info update.", tag="warn")
             return
@@ -412,7 +502,7 @@ class InputManager:
         except Exception as e:
             raise ValueError(f"Failed to map internal value to GUI label for {module}:{param}: {e}")
         
-    def write_single_param(self, cmd_handler, flat_key, entry) -> bool:
+    def write_single_param(self, cmd_handler, flat_key, entry):
         """
         Perform write for a single param.
         Args:
@@ -420,25 +510,25 @@ class InputManager:
             entry - dict with ['section', 'widget', 'select']
 
         Returns:
-            True if write succeeded, False otherwise
+            (True, validated_value) if write succeeded, (False, None) otherwise.
         """
         # Step 1: Get module name from section
         section = entry["section"]
         module  = next((k for k, v in PRD_INI_SECTIONS.items() if v == section), None)
         if module is None:
-            self.log_handler.log(f"[ERROR] INI {section} didn't have module")
+            safe_log(self.log_handler, f"[ERROR] INI {section} didn't have module", tag="error")
             return False, None
 
         # Step 2: Get param name from CMD_TABLE
         cmd_def = CMD_TABLE.get(module, {})
         param = next((p for p, d in cmd_def.items() if d.get("flat_key") == flat_key), None)
         if param is None:
-            self.log_handler.log(f"[ERROR] {section}->{module} didn't have param")
+            safe_log(self.log_handler, f"[ERROR] {section}->{module} didn't have param", tag="error")
             return False, None
-                
+
         # Step 3: Check this parameter writable?
         if not CMD_TABLE[module][param].get("writable", True):
-            self.log_handler.log(f"[INFO] Skipping read-only param: {flat_key} ({module} -> {param})")
+            safe_log(self.log_handler, f"[INFO] Skipping read-only param: {flat_key} ({module} -> {param})", tag="info")
             return False, None
 
         # Step 4: Get current value from widget
@@ -454,105 +544,106 @@ class InputManager:
             value = self.get_gui_to_internal_value(module, param, gui_value)
 
         try:
+            # Validated locally so callers (e.g. write_and_verify_device's
+            # read-back comparison) get the validated value back on success.
+            # write_single_param_direct() below validates again internally
+            # before sending — cheap and pure, and it keeps that function's
+            # existing contract/return type untouched for its other caller,
+            # write_module_direct().
             ok, validated_value = validate_param_value(module, param, value)
             if not ok:
-                self.log_handler.log(f"[ERROR] Value Error {flat_key}->{module}->{param}: {value}")
+                safe_log(self.log_handler, f"[ERROR] Value Error {flat_key}->{module}->{param}: {value}", tag="error")
                 return False, None  # validation function logs internally
-                
-            self.log_handler.log(f"[TX] {flat_key}->{module}->{param} = {validated_value}")
-            result = cmd_handler.set_remote_value(flat_key, module, param, validated_value)
-            
-            if result != 0x00:
-                self.log_handler.log(f"[ERROR] Failed to write {flat_key}", tag="info")
-                logging.info(f"{module}->{param}->{value} not written")            
-                return False, None
-            else:
-                self.log_handler.log(f"[INFO] Successfully written {flat_key}", tag="info")
-                logging.info(f"{module}->{param}->{value} written successfully")            
-                return True, validated_value
-            
+
+            # Step 5: Delegate the actual transmit to cmd_helpers' direct
+            # helper instead of calling cmd_handler.set_remote_value()
+            # directly. The old code here never special-cased a "WAIT"
+            # (session-mode) reply — it fell straight into the failure
+            # branch — unlike write_single_param_direct(), which already
+            # polls correctly via _wait_for_last_reply(). See CLAUDE.md
+            # known issues ("last_reply is confirmed unconsumed" /
+            # write_module_direct correction). Currently unreachable in
+            # practice since VibMTool never enables session mode, but this
+            # removes the duplicate/incorrect logic rather than leaving a
+            # latent trap plus two implementations to keep in sync.
+            success = write_single_param_direct(cmd_handler, self.log_handler, module, param, validated_value)
+            return success, (validated_value if success else None)
+
         except Exception as e:
-            self.log_handler.log(f"[EXCEPTION] {flat_key} write failed: {e}")
+            safe_log(self.log_handler, f"[EXCEPTION] {flat_key} write failed: {e}", tag="error")
             return False, None
     
-    def read_single_param(self, cmd_handler, flat_key, entry) -> bool:
+    def read_single_param(self, cmd_handler, flat_key, entry):
         """
         Read a single parameter from remote, validate it, and update the GUI widget.
         Args:
             flat_key - e.g., 'brd_hw_cfg_rtc'
             entry - dict with ['section', 'widget', 'select']
         Returns:
-            True if read succeeded and value updated, False otherwise
+            (True, validated_value) if read succeeded and widget updated, (False, None) otherwise.
         """
         # Step 1: Get module name from section
         section = entry["section"]
         module = next((k for k, v in PRD_INI_SECTIONS.items() if v == section), None)
         if module is None:
-            self.log_handler.log(f"[ERROR] INI section '{section}' has no mapped module", tag="error")
+            safe_log(self.log_handler, f"[ERROR] INI section '{section}' has no mapped module", tag="error")
             return False, None
 
         # Step 2: Get param name from CMD_TABLE
         cmd_def = CMD_TABLE.get(module, {})
         param = next((p for p, d in cmd_def.items() if d.get("flat_key") == flat_key), None)
         if param is None:
-            self.log_handler.log(f"[ERROR] {module} has no parameter for flat_key: {flat_key}", tag="error")
+            safe_log(self.log_handler, f"[ERROR] {module} has no parameter for flat_key: {flat_key}", tag="error")
             return False, None
-                
-        # Step 3: Read the parameter value from remote
+
+        # Step 3: Delegate the actual read to cmd_helpers' direct helper.
+        # read_single_param_direct() already validates and correctly polls
+        # for a "WAIT" (session-mode) reply via _wait_for_last_reply(); the
+        # old code here called cmd_handler.get_remote_value() directly and
+        # fed a literal "WAIT" string straight into validate_param_value(),
+        # which logged it as a validation failure instead of a pending
+        # reply. See CLAUDE.md known issues. Currently unreachable in
+        # practice (VibMTool never enables session mode), but this removes
+        # the duplicate/incorrect logic rather than leaving it as a trap.
         try:
-            self.log_handler.log(f"[RX] Reading {flat_key} -> {module} -> {param}", tag="info")
-            value = cmd_handler.get_remote_value(flat_key, module, param)
+            success, validated_value = read_single_param_direct(cmd_handler, self.log_handler, module, param)
+        except Exception as e:
+            safe_log(self.log_handler, f"[EXCEPTION] {flat_key} read failed: {e}", tag="error")
+            success, validated_value = False, None
 
-            if value is None:
-                self.log_handler.log(f"[ERROR] Remote read failed for {flat_key}", tag="error")
-                # GUI Cleanup on failure
-                widget = entry["widget"]
-                if isinstance(widget, ttk.Entry):
-                    widget.delete(0, tk.END)
-                elif hasattr(widget, "var"):
-                    widget.var.set("")  # Clear checkbox / dropdown / string
-                return False, None
-            
-            ok, validated_value = validate_param_value(module, param, value)
-            if not ok:
-                self.log_handler.log(f"[ERROR] Validation failed for {flat_key} -> {value}", tag="error")
-                # GUI Cleanup on failure
-                widget = entry["widget"]
-                if isinstance(widget, ttk.Entry):
-                    widget.delete(0, tk.END)
-                elif hasattr(widget, "var"):
-                    widget.var.set("")  # Clear checkbox / dropdown / string
-                
-                return False, None
+        widget = entry["widget"]
 
-            # Step 4: Update the received value to widget
-            # --- Update GUI widget ---
-            widget = entry["widget"]
-            param_info = cmd_def[param]
-            gui_def = param_info.get("gui", {})
-
+        if not success:
+            # GUI cleanup on failure
             if isinstance(widget, ttk.Entry):
                 widget.delete(0, tk.END)
-                widget.insert(0, str(validated_value))
-
-            elif hasattr(widget, "var") and isinstance(widget.var, tk.BooleanVar):
-                widget.var.set(bool(int(validated_value)))  # Ensure 1/0 gets converted properly
-
-            elif hasattr(widget, "var") and isinstance(widget.var, tk.StringVar):
-                # Convert internal value (e.g., 'U') to display label (e.g., 'USB') if options exist
-                gui_value = self.get_internal_value_to_gui(module, param, validated_value)
-                widget.var.set(gui_value)
-
-            else:
-                self.log_handler.log(f"[WARN] Unknown widget type for {flat_key}", tag="warn")
-
-            self.log_handler.log(f"[INFO] Read success: {module} -> {param} = {validated_value}", tag="info")
-
-            return True, validated_value
-
-        except Exception as e:
-            self.log_handler.log(f"[ERROR] Exception while reading {flat_key}: {e}", tag="error")
+            elif hasattr(widget, "var"):
+                widget.var.set("")  # Clear checkbox / dropdown / string
             return False, None
+
+        # Step 4: Update the received value to widget
+        # --- Update GUI widget ---
+        param_info = cmd_def[param]
+        gui_def = param_info.get("gui", {})
+
+        if isinstance(widget, ttk.Entry):
+            widget.delete(0, tk.END)
+            widget.insert(0, str(validated_value))
+
+        elif hasattr(widget, "var") and isinstance(widget.var, tk.BooleanVar):
+            widget.var.set(bool(int(validated_value)))  # Ensure 1/0 gets converted properly
+
+        elif hasattr(widget, "var") and isinstance(widget.var, tk.StringVar):
+            # Convert internal value (e.g., 'U') to display label (e.g., 'USB') if options exist
+            gui_value = self.get_internal_value_to_gui(module, param, validated_value)
+            widget.var.set(gui_value)
+
+        else:
+            safe_log(self.log_handler, f"[WARN] Unknown widget type for {flat_key}", tag="warn")
+
+        safe_log(self.log_handler, f"[INFO] Read success: {module} -> {param} = {validated_value}", tag="info")
+
+        return True, validated_value
     
 #-------------------------------------------------------------------------------
 # Class: SetupManager
@@ -677,7 +768,12 @@ class SetupDialog:
             rel_path = self.path_handler.get_relative_path(self.setup_path)
             if self.new_setup: # from Master, default also needed to populated missing keys
                 self.im.load_from_defaults()
-                self.im.load_from_master(self.setup_path)
+                if not self.im.load_from_master(self.setup_path):
+                    # Serial prompt cancelled/invalid or master unreadable —
+                    # abort instead of opening the dialog on pure defaults and
+                    # logging a misleading "Loaded" message ([T4]).
+                    self.log_handler.log(f"{prefix} setup aborted — master not applied.", tag="warn")
+                    return
                 self.log_handler.log(f"Loaded {prefix} Config from: {rel_path}", tag='info')
             else:
                 self.im.load_from_ini(self.setup_path)
@@ -737,12 +833,12 @@ class SetupDialog:
         btn_save = ttk.Button(btn_frame, style=WIDGET_STYLE_BUTTON, text="Save", width=12, 
                    command=self._on_save, cursor="hand2")
         btn_save.pack(side="left",padx=(0, PAD_SIDE))
-        apply_tooltip(btn_save, "Save", PROGAM_KEY_TOOLTIPS)
+        apply_tooltip(btn_save, "Save", PROGRAM_KEY_TOOLTIPS)
         
         btn_cancel = ttk.Button(btn_frame, style=WIDGET_STYLE_BUTTON, text="Cancel", width=12, 
                     command=self.window.destroy, cursor="hand2")
         btn_cancel.pack(side="right", padx=(PAD_SIDE, 0))
-        apply_tooltip(btn_cancel, "Cancel", PROGAM_KEY_TOOLTIPS)
+        apply_tooltip(btn_cancel, "Cancel", PROGRAM_KEY_TOOLTIPS)
 
     # Write/Read/Verify/Cancel Buttons -----------------------------------------
     def _draw_program_footer_buttons(self, main_frame):
@@ -754,7 +850,7 @@ class SetupDialog:
                         command=self.toggle_select_all, cursor="hand2",
                         style=WIDGET_STYLE_BUTTON, takefocus=False)
         self.btn_select.pack(side="left", padx=(0, PAD_SIDE))
-        apply_tooltip(self.btn_select, "select_all", PROGAM_KEY_TOOLTIPS)
+        apply_tooltip(self.btn_select, "select_all", PROGRAM_KEY_TOOLTIPS)
         
         for label, command in [
             ("Write",           self.write_to_device),
@@ -765,14 +861,14 @@ class SetupDialog:
             btn = ttk.Button(btn_frame, text=label, width=12, command=command,
                             cursor="hand2", style=WIDGET_STYLE_BUTTON, takefocus=False)
             btn.pack(side="left", padx=(0, PAD_SIDE))
-            apply_tooltip(btn, label, PROGAM_KEY_TOOLTIPS)
+            apply_tooltip(btn, label, PROGRAM_KEY_TOOLTIPS)
 
         # Cancel button at far right
         btn = ttk.Button(btn_frame, text="Cancel", width=12,
                    command=self.window.destroy, cursor="hand2",
                    style=WIDGET_STYLE_BUTTON, takefocus=False)
         btn.pack(side="right", padx=(PAD_SIDE, 0))
-        apply_tooltip(btn, "Cancel", PROGAM_KEY_TOOLTIPS)
+        apply_tooltip(btn, "Cancel", PROGRAM_KEY_TOOLTIPS)
  
     def toggle_select_all(self):
         new_state = self.select_all_state.get()  # Get current mode (True = select all)
@@ -791,6 +887,23 @@ class SetupDialog:
         else:
             self.btn_select.config(text="Select All")
 
+    def _get_serial_from_widget(self):
+        """Validated serial from the sys_ser_no widget -> (ok, int).
+        Guards the previously-unchecked int() that crashed the Tk callback
+        silently on empty/non-numeric input, and applies SERIAL_RANGE, which
+        was only enforced on the load_from_master prompt path ([T2])."""
+        raw = self.im.program_widgets['sys_ser_no']['widget'].get()
+        try:
+            serial_no = int(str(raw).strip())
+            if not SERIAL_RANGE[0] <= serial_no <= SERIAL_RANGE[1]:
+                raise ValueError(f"out of range {SERIAL_RANGE}")
+        except (ValueError, TypeError):
+            msg = f"Serial number must be an integer in range {SERIAL_RANGE} (got: '{raw}')"
+            self.log_handler.log(f"[ERROR] {msg}", tag="error")
+            messagebox.showerror("Invalid Serial Number", msg)
+            return False, None
+        return True, serial_no
+
     def write_to_device(self):
         """Write selected parameters to the connected device."""
 
@@ -799,13 +912,16 @@ class SetupDialog:
             messagebox.showwarning("Warning", "No parameters selected to process.")
             return  # or handle gracefully depending on context
         
-        serial_no = int(self.im.program_widgets['sys_ser_no']['widget'].get())
+        ok, serial_no = self._get_serial_from_widget()
+        if not ok:
+            return
         set_sys_value("sys_ser_no", serial_no)
         
         for flat_key, entry in self.im.program_widgets.items():
             if entry["select"].get():
-                success = self.im.write_single_param(self.cmd_handler, flat_key, entry)
-                self.im.program_widgets[flat_key]["status"] = "OK" if success else "FAIL"
+                success, _ = self.im.write_single_param(self.cmd_handler, flat_key, entry)
+                # per-param outcome already logged by write_single_param;
+                # the old ["status"] store here was write-only ([T7])
                 
     def read_from_device(self):
         """Read selected parameters from the connected device."""
@@ -815,13 +931,16 @@ class SetupDialog:
             messagebox.showwarning("Warning", "No parameters selected to process.")
             return  # or handle gracefully depending on context
         
-        serial_no = int(self.im.program_widgets['sys_ser_no']['widget'].get())
+        ok, serial_no = self._get_serial_from_widget()
+        if not ok:
+            return
         set_sys_value("sys_ser_no", serial_no)
         
         for flat_key, entry in self.im.program_widgets.items():
             if entry["select"].get():
-                success = self.im.read_single_param(self.cmd_handler, flat_key, entry)
-                self.im.program_widgets[flat_key]["status"] = "OK" if success else "FAIL"
+                success, _ = self.im.read_single_param(self.cmd_handler, flat_key, entry)
+                # per-param outcome already logged by read_single_param;
+                # the old ["status"] store here was write-only ([T7])
 
     def write_and_verify_device(self):
         """Perform write + read-back verification for selected parameters."""
@@ -830,7 +949,9 @@ class SetupDialog:
             messagebox.showwarning("Warning", "No parameters selected to process.")
             return
 
-        serial_no = int(self.im.program_widgets['sys_ser_no']['widget'].get())
+        ok, serial_no = self._get_serial_from_widget()
+        if not ok:
+            return
         set_sys_value("sys_ser_no", serial_no)
 
         self.im.verification_results = {}  # Clear old results
@@ -885,8 +1006,10 @@ class SetupDialog:
         self.im.inputs["client_info"]["created_on"] = timestamp
 
         # --- Step 3: Prepare output file name ---
-        filename = f"build_{client}_{order_id}_{serial_no}.txt"
+        filename = f"build_{_sanitize_filename_part(client)}_{_sanitize_filename_part(order_id)}_{serial_no}.txt"
         file_path = os.path.join(self.config_dir, filename)
+        if not _confirm_overwrite(file_path):
+            return
 
         # --- Step 4: Collect all input dictionaries ---
         all_sections = [
@@ -986,6 +1109,7 @@ class SummaryDialog:
         self.metadata_hdr = []
         self.client_info = {}
         self.export_file = None
+        self.displayed_serials = set()   # exists even if load_master_file() fails
         self.start()
 
     #---------------------------------------------------------------------------
@@ -1063,11 +1187,13 @@ class SummaryDialog:
     #---------------------------------------------------------------------------
     def generate_metadata_header(self) -> list:
         """Return a list of formatted metadata lines for export headers."""
-        client   = self.client_info.get("client", "unknown").title()
-        order_id = self.client_info.get("order_id", "0000")
+        # str() guards — see [T6]; this runs OUTSIDE export_text's try, so an
+        # AttributeError here was previously uncaught.
+        client   = str(self.client_info.get("client", "unknown")).title()
+        order_id = str(self.client_info.get("order_id", "0000"))
         created  = datetime.now().strftime("%d %b %Y %H:%M:%S")
         master   = os.path.basename(self.master_file)
-        self.export_file = f"summary_{client.lower()}_{order_id}"
+        self.export_file = f"summary_{_sanitize_filename_part(client.lower())}_{_sanitize_filename_part(order_id)}"
 
         self.metadata_hdr = [
             "Production Summary",
@@ -1105,18 +1231,27 @@ class SummaryDialog:
 
             for fname in os.listdir(self.config_dir):
                 if fname.startswith("device_") and fname.endswith(".ini"):
-                    # Expecting format: device_<client>_<order_id>_<serial>.ini
-                    parts = fname.split("_")
-                    if len(parts) >= 3:
-                        serial = parts[3].split(".")[0]
-                        fpath  = os.path.join(self.config_dir, fname)
-                        try:
-                            cfg = ConfigIO(self.path_handler, self.log_handler)
-                            dev_cfg = cfg.load_file(fpath)
-                            dt = dev_cfg.get("client_info", {}).get("created_on", "Missing Date")
-                        except Exception:
-                            dt = "Not readable"
-                        device_files_found[serial] = dt
+                    # Format: device_<client>_<order_id>_<serial>.ini — client/order
+                    # are free text and may themselves contain "_", so the serial
+                    # is extracted via an anchored regex on the trailing numeric
+                    # group rather than a fixed split-position (parts[3]), which
+                    # silently returned the wrong field (or raised IndexError) for
+                    # any client/order containing an underscore.
+                    match = DEVICE_FILENAME_RE.match(fname)
+                    if not match:
+                        self.log_handler.log(
+                            f"Skipping unrecognized device file (couldn't parse serial): {fname}",
+                            tag="warn")
+                        continue
+                    serial = match.group(1)
+                    fpath  = os.path.join(self.config_dir, fname)
+                    try:
+                        cfg = ConfigIO(self.path_handler, self.log_handler)
+                        dev_cfg = cfg.load_file(fpath)
+                        dt = dev_cfg.get("client_info", {}).get("created_on", "Missing Date")
+                    except Exception:
+                        dt = "Not readable"
+                    device_files_found[serial] = dt
 
             # --- Populate Treeview from master file entries ---
             for row in self.tree.get_children():
@@ -1124,7 +1259,7 @@ class SummaryDialog:
 
             self.displayed_serials = set()
 
-            for sn, entry in sorted(self.device_info.items(), key=lambda x: int(x[0])):
+            for sn, entry in sorted(self.device_info.items(), key=lambda x: _serial_sort_key(x[0])):
                 parts  = entry.split(",", 1)
                 status = parts[0].strip()
                 date   = parts[1].strip() if len(parts) > 1 else ""
@@ -1151,7 +1286,7 @@ class SummaryDialog:
             # --- Handle extra device files not listed in master ---
             if IS_ENABLED("ENABLE_EXTRA_DEVICE"):
                 existing_serials = {row[0] for row in self.displayed_serials}
-                for sn, created in sorted(device_files_found.items(), key=lambda x: int(x[0])):
+                for sn, created in sorted(device_files_found.items(), key=lambda x: _serial_sort_key(x[0])):
                     if sn not in existing_serials:
                         self.tree.insert("", "end", values=(sn, "extra", created, "Yes"))
                         self.displayed_serials.add((sn, "extra", created, "Yes"))
@@ -1175,6 +1310,8 @@ class SummaryDialog:
         self.generate_metadata_header()
         file_name = f"{self.export_file}.txt"
         full_path = os.path.join(self.config_dir, file_name)
+        if not _confirm_overwrite(full_path):
+            return
 
         try:
             with open(full_path, "w", encoding="utf-8") as f:
@@ -1185,7 +1322,7 @@ class SummaryDialog:
 
                 f.write("{:<15}{:<20}{:<20}{}\n".format("Serial No.", "Device Status", "Created On", "File"))
                 f.write("=" * 70 + "\n")
-                for sn, status, created, file in sorted(self.displayed_serials, key=lambda x: int(x[0])):
+                for sn, status, created, file in sorted(self.displayed_serials, key=lambda x: _serial_sort_key(x[0])):
                     f.write("{:<15}{:<20}{:<20}{}\n".format(sn, status, created, file))
                 
             self.log_handler.log(f"Text Summary exported to: {file_name}", tag="info")
@@ -1212,6 +1349,8 @@ class SummaryDialog:
         self.generate_metadata_header()
         file_name = f"{self.export_file}.csv"
         full_path = os.path.join(self.config_dir, file_name)
+        if not _confirm_overwrite(full_path):
+            return
 
         try:
             with open(full_path, "w", newline="", encoding="utf-8") as csvfile:
@@ -1224,7 +1363,7 @@ class SummaryDialog:
 
                 # --- Table Header and Data Rows ---
                 writer.writerow(["Serial No.", "Device Status", "Created On", "File"])
-                for sn, status, created, file in sorted(self.displayed_serials, key=lambda x: int(x[0])):
+                for sn, status, created, file in sorted(self.displayed_serials, key=lambda x: _serial_sort_key(x[0])):
                     writer.writerow([sn, status, created, file])
 
             self.log_handler.log(f"CSV summary exported to: {file_name}", tag="info")
@@ -1250,6 +1389,8 @@ class SummaryDialog:
         self.generate_metadata_header()
         file_name = f"{self.export_file}.pdf"
         full_path = os.path.join(self.config_dir, file_name)
+        if not _confirm_overwrite(full_path):
+            return
 
         try:
             with PdfPages(full_path) as pdf:
@@ -1261,7 +1402,7 @@ class SummaryDialog:
                 lines.append("")
                 lines.append("{:<15}{:<20}{:<20}{}".format("Serial No.", "Device Status", "Created On", "File"))
                 lines.append("=" * 70)
-                for sn, status, created, file in sorted(self.displayed_serials, key=lambda x: int(x[0])):
+                for sn, status, created, file in sorted(self.displayed_serials, key=lambda x: _serial_sort_key(x[0])):
                     lines.append("{:<15}{:<20}{:<20}{}".format(sn, status, created, file))
 
                 # --- Insert Text ---

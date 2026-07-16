@@ -11,11 +11,11 @@ from scipy.signal   import iirnotch, butter, filtfilt, get_window
 
 #-------------------------------------------------------------------------------
 # import the user functions and classes
-import common.modules.cmd_remote  as cmd_remote
-from common.utils.utils_helpers import get_sensor_unit_factor, safe_log
-from common.core.sys_config     import sys_config_init, get_sys_value, set_sys_value
-from common.core.common         import get_session_flag, set_session_flag, dt_sample
-from common.core.parameters     import (
+import vibmshared.modules.cmd_remote  as cmd_remote
+from vibmshared.utils.utils_helpers import get_sensor_unit_factor, safe_log
+from vibmshared.core.sys_config     import get_sys_value, set_sys_value
+from vibmshared.core.common         import get_session_flag, set_session_flag, dt_sample
+from vibmshared.core.parameters     import (
     FilterParams, 
     WindowParams, 
     TransformParams, 
@@ -45,18 +45,18 @@ class Signal:
         self.record_second_counter = 0
         
         # Event handling
-        self.event_type      = None  # store type of venet - event or saturation
+        self.event_type      = None  # store type of event - event or saturation
         self.event_counter   = 0     # used for centre detection of event
         self.event_detected  = False # preserve till data are not saved, event status
         self.event_filename  = None  # store the event file name
-        self.event_start_time= None  # store the startting time of event data
+        self.event_start_time= None  # store the starting time of event data
         
         # Data buffers
         self.all_fragments_rcvd  = False
         self.samples_in_fragment = get_sys_value('adc_fragment')
         self.sensor_factor = get_sensor_unit_factor(get_sys_value('time_yspan'))
        
-        self.init_signals_buffers()
+        self.clear_signal_buffers()
 
     #---------------------------------------------------------------------------
     def insert_new_data(self, new_ydata):
@@ -153,7 +153,7 @@ class Signal:
             self.save_full_window_data()
 
     #---------------------------------------------------------------------------
-    def init_signals_buffers(self):
+    def clear_signal_buffers(self):
         """Set up time and frequency domain data containers based on config."""
         # must be first statement, due to dependancy of it on others
         self.no_of_channels  = get_sys_value('adc_channels')
@@ -182,26 +182,83 @@ class Signal:
         self.fragment_received = np.zeros((self.no_of_channels, self.no_of_fragments), dtype = bool)
 
     #---------------------------------------------------------------------------
-    def clear_signal_buffers(self):
-        self.init_signals_buffers()
+    def save_centered_event(self):
+        """Advance the post-event counter; once the event has scrolled to the
+        centre of the display window, write it out and reset event state.
 
-    #---------------------------------------------------------------------------
-    def event_centered(self):
-        """If an event is centered in window, save and reset its parameters"""
+        Returns:
+            True  - event was centred and saved successfully.
+            False - event was centred but the save failed (already logged).
+            None  - nothing to do this call: either no event is active, or the
+                    active event has not yet reached the centre of the window.
+
+        Contract notes for the next-stage driver (these funcs are not wired yet):
+        - [B] The return is deliberately tri-valued (True / False / None, see
+          above), so a caller can already act on all three outcomes. The one
+          ambiguity that remains: BOTH "no event active" and "event active but
+          not yet centred" collapse to None. That is fine for the intended
+          usage — call this once per completed second and simply ignore None —
+          because the caller does not need to act differently in those two idle
+          states. Only if a future caller must distinguish "idle" from "counting
+          toward centre" (e.g. to drive a UI countdown) should this be split
+          into two distinct sentinels (e.g. a small status enum) instead of
+          overloading None. Decide that when the driver is written; today's
+          three values are sufficient.
+        - [C] CONFIRMED BEHAVIOUR, not a bug: event_detected/event_counter are
+          reset BEFORE the save is attempted on purpose. If the save fails there
+          is nothing worth keeping — the rolling buffer has already scrolled past
+          this event — so we log the failure (above), drop the event, and let
+          detection immediately re-arm for the next one. Do NOT "fix" this by
+          deferring the reset until after a successful save.
+        """
+        # [A] Only advance/save while an event is actually active. Without this
+        # guard a stray call still increments the counter and, once it crosses
+        # the centre threshold, calls save_event_data() with a stale/None
+        # filename (get_save_path(None) -> TypeError).
+        if not self.event_detected:
+            return
+
         self.event_counter += 1
         if PlotParams.is_event_centre(self.event_counter):
             self.event_counter = 0
             self.event_detected = False
-            self.file_handler.save_event_data(self.event_filename, self.t_ydata,
-                                                self.event_start_time, self.event_type)
+            if not self.file_handler.save_event_data(self.event_filename, self.t_ydata, self.event_start_time, self.event_type):
+                safe_log(None, f"Aborting: Event write failed for {self.event_filename}", tag = "error", do_print = True)
+                return False
 
+            return True
+            
     #---------------------------------------------------------------------------
-    def get_event_file_name(self):
-        """Detect the first event fragment in a second (non-zero type marks an event)"""
-        if not self.event_detected and self.hdr_handler.fragment_type != "normal":
+    def prepare_event_file_param(self):
+        """Detect the first event/saturation fragment of a new event and arm a
+        capture: record the event type, start time and output file name so a
+        later save_centered_event() call can write the window out.
+
+        No return value — it mutates event state (event_detected, event_type,
+        event_start_time, event_filename, event_counter) as a side effect.
+
+        Note on the event timestamp for the next-stage driver:
+        - system_time is sourced by HeaderProcessor from the remote GSN node
+          (RTC) when available, else the laptop clock — remote takes priority.
+        - The file-header "Start Date/Time" is event_start_time =
+          system_time - PRE_EVENT_SECOND, and the samples written come from
+          PlotParams.get_event_sample_slice() — a symmetric window of
+          PRE_EVENT_SECOND before .. after the display-window middle. These line
+          up (first written sample time == event_start_time) as long as the
+          driver saves while the event sits at that middle second, which is the
+          design intent. Keep the two in step if the pre/post seconds or the
+          centring rule ever change.
+        """
+        # [D] Only genuine event/saturation fragments start a capture. The old
+        # `!= "normal"` also matched "unknown" (HeaderProcessor's fallback for a
+        # corrupted/unrecognised type code), which would spuriously trigger a
+        # capture into an "unknown_*.txt" file.
+        if not self.event_detected and self.hdr_handler.fragment_type in ("event", "saturation"):
             self.event_counter  = 0
             self.event_detected = True
-            self.event_start_time = self.hdr_handler.system_time - PlotParams.PRE_EVENT_SECOND
+            # [E] system_time may be np.uint32 (RTC path); cast to int first so
+            # a value < PRE_EVENT_SECOND can't underflow-wrap to ~4.29e9.
+            self.event_start_time = int(self.hdr_handler.system_time) - PlotParams.PRE_EVENT_SECOND
             self.event_type = self.hdr_handler.fragment_type # for meta data
             file_str = self.hdr_handler.get_time_string(self.hdr_handler.system_time, only_filename=True)
             self.event_filename = f"{self.event_type}_{file_str}"
@@ -209,12 +266,16 @@ class Signal:
     #---------------------------------------------------------------------------
     def open_new_record_file(self, file_str, date_str, time_str, current_hour):
         file_name = f"record_{file_str}"
-        self.record_filename = self.file_handler.get_save_path(file_name)
-        self.file_handler.write_metadata(self.record_filename, date_str, time_str)
         self.record_start_hour = current_hour
+        self.record_filename = self.file_handler.get_save_path(file_name)
+        if not self.file_handler.write_metadata(self.record_filename, date_str, time_str):
+            safe_log(None, f"Aborting: metadata write failed for {self.record_filename}", tag = "error", do_print = True)
+            return False
+
         rel_path = self.path_handler.get_relative_path(self.record_filename)
         logging.info(f"[Recording] New file opened: {rel_path}")
-
+        return True
+        
     #---------------------------------------------------------------------------
     def close_current_file(self):
         """Dummy closer now that we use 'with open()' for all writes. It is just message function now"""
@@ -296,20 +357,27 @@ class Signal:
         self.record_second_counter += 1
         if self.record_second_counter >= PlotParams.get_time_x_span():
             self.record_second_counter = 0
-            self.file_handler.write_data(self.record_filename, self.t_ydata)
+            if not self.file_handler.write_data(self.record_filename, self.t_ydata):
+                safe_log(None, f"Data write failed for {self.record_filename} (metadata was written)", tag = "error", do_print = True)
+                return False
+                
             rel_path = self.path_handler.get_relative_path(self.record_filename)
             logging.info(f"[Recording] Data saved to: {rel_path}")
-
+            return True
+            
     #---------------------------------------------------------------------------
     def save_partial_window_data(self):
         if self.record_second_counter > 0:
             partial_samples = get_sys_value('adc_srate') * self.record_second_counter
-            # trimmed_data = [list(ch)[-partial_samples:] for ch in self.t_ydata]
-            trimmed_data = [np.array(ch)[-partial_samples:] for ch in self.t_ydata] # need to verify
-            self.file_handler.write_data(self.record_filename, trimmed_data)
+            trimmed_data = [np.array(ch)[-partial_samples:] for ch in self.t_ydata]
+            if not self.file_handler.write_data(self.record_filename, trimmed_data):
+                safe_log(None, f"Data write failed for {self.record_filename} (metadata was written)", tag = "error", do_print = True)
+                return False
+
             rel_path = self.path_handler.get_relative_path(self.record_filename)
             logging.info(f"[Recording] Final {self.record_second_counter}s written to {rel_path}")
             self.record_second_counter = 0
+            return True
 
     #---------------------------------------------------------------------------
     def extract_hour(self, time_str):
@@ -334,6 +402,15 @@ class Signal:
         # else:
           # return ydata
 
+    #---------------------------------------------------------------------------
+    def shift_leftover(self, consumed):
+        """After consuming `consumed` bytes from the front of ser_buffer, shift any
+        remaining unconsumed bytes down to index 0 so future reads stay aligned."""
+        remaining = self.ser_buffer_bytes - consumed
+        if remaining > 0:
+            self.ser_buffer[0:remaining] = self.ser_buffer[consumed:consumed + remaining]
+        self.ser_buffer_bytes = remaining
+        
     #---------------------------------------------------------------------------
     def data_capture(self, serial_port):
         """
@@ -360,24 +437,22 @@ class Signal:
                     self.ser_buffer_bytes += read_size
                     start_time = time.time()  # Reset timeout after receiving data
 
-                    # if first byte of buffer is CMD_HDR_ID and Waiting for command
-                    # change the expected_reply_size to reply size to complete the message.
+                    # if first byte of buffer is CMD_HDR_ID, resize to the command-reply size
                     frame_id = self.ser_buffer[0]
-                    if get_session_flag('cmd_waiting') and frame_id == cmd_remote.CMD_HDR_ID:
+                    if frame_id == cmd_remote.CMD_HDR_ID:
                         expected_reply_size = self.cmd_handler.get_expected_response_size()
 
                     if self.ser_buffer_bytes >= expected_reply_size:
                         if frame_id == DataHdrParams.DATA_HDR_ID:
                             data = self.convert_to_int16(self.ser_buffer[:expected_reply_size])
-                            self.ser_buffer_bytes -= expected_reply_size  # reduce buffer counts
-                            return data  # Return captured data and process as adc data
+                            self.shift_leftover(expected_reply_size)
+                            return data  # Return captured data and process as adc data; any leftover handled next call
 
                         elif frame_id == cmd_remote.CMD_HDR_ID:
                             response = self.ser_buffer[:expected_reply_size]  # Extract full response
-                            self.ser_buffer_bytes -= expected_reply_size
-                            set_session_flag('cmd_waiting', False)   # Mark system as waiting of command is over
+                            self.shift_leftover(expected_reply_size)
                             self.cmd_handler.rcv_response(response)  # Process response
-                            return None  # Do not process as ADC data
+                            return None  # Reply handled; any leftover (next data fragment) handled next call
 
                         else:
                             print(f"[WARNING] Unexpected Frame ID: 0x{frame_id:02X}, Ignoring...")
@@ -387,7 +462,6 @@ class Signal:
                 # Prevent excessive blocking - time out or session closed, return from while loop
                 if time.time() - start_time > timeout or not get_session_flag('session'):
                 # Ensure the buffer contains a multiple of 2 bytes before processing
-                    
                     if self.ser_buffer_bytes:
                         data = None
                         aligned_size = self.ser_buffer_bytes - (self.ser_buffer_bytes % 2)  # Ensure even bytes  
@@ -402,7 +476,7 @@ class Signal:
                         else:
                             self.ser_buffer_bytes = 0  # No leftover bytes  
 
-                        print(f"[WARNING] Timeout reached, returning partial buffer: {len(data) if data else 0} sample words")
+                        print(f"[WARNING] Timeout reached, returning partial buffer: {len(data) if data is not None else 0} sample words")
                         return data  # Return partial data or None if no aligned bytes available  
 
                     else:
@@ -515,8 +589,7 @@ class SignalProcessor:
             return fft_data, dc_component        
 
         else:
-            print(f"[WARNING] Invalid transform selection: {self.selected_transform}. Defaulting to FFT.")
-            fft_data = np.abs(rfft(ydata))
+            print(f"[WARNING] Invalid transform selection: {self.selected_transform}. Returning empty spectrum.")
             return np.zeros(1), 0
 
 

@@ -21,10 +21,10 @@ REM   SET "BAK_FOLDER=."                 => Project root to scan
 REM   SET "WINRAR_EXE=..."               => Path to WinRAR's rar.exe
 REM   SET "BACKUP_DEST=..\backup"        => Final backup folder, one folder up
 REM   SET "BACKUP_PREFIX=Software"       => Filename prefix
-REM   SET "INCLUDE_ONLY=common,gui"      => Comma-separated folders to include
-REM   SET "EXCLUDE_ONLY=common,gui"      => Comma-separated folders to exclude
-REM   SET "INCLUDE_FILES=common,gui"     => Comma-separated files to include
-REM   SET "EXCLUDE_FILES=common,gui"     => Comma-separated files to exclude
+REM   SET "INCLUDE_ONLY=VibMShared,gui"      => Comma-separated folders to include
+REM   SET "EXCLUDE_ONLY=VibMShared,gui"      => Comma-separated folders to exclude
+REM   SET "INCLUDE_FILES=VibMShared,gui"     => Comma-separated files to include
+REM   SET "EXCLUDE_FILES=VibMShared,gui"     => Comma-separated files to exclude
 REM
 REM  [OUTPUT FORMAT]
 REM   - Backup file: Software_YYMMDD_AMHHMM.rar
@@ -42,13 +42,13 @@ SET "BACKUP_PREFIX=Software"
 SET "PRJ_NAME=VibrationTableRevA"
 
 REM Comma-separated folders, files, wjen ^ used, remove quotes, no indent allowed
-SET "INCLUDE_ONLY=common,productiontool,vibmscope"
-SET EXCLUDE_ONLY=common/others, common/tools,^
-productiontool/config,productiontool/data,productiontool/logs,^
-vibmscope/config,vibmscope/data,vibmscope/logs
+SET "INCLUDE_ONLY=VibMShared,VibMTool,VibMScope"
+SET EXCLUDE_ONLY=VibMShared/others, VibMShared/tools,^
+VibMTool/config,VibMTool/data,VibMTool/logs,^
+VibMScope/config,VibMScope/data,VibMScope/logs
 
-REM SET "INCLUDE_FILES=common/tools/backup.bat"
-REM SET "EXCLUDE_FILES=common/core/maps_logo.ico"
+REM SET "INCLUDE_FILES=VibMShared/tools/backup.bat"
+REM SET "EXCLUDE_FILES=VibMShared/core/maps_logo.ico"
 
 REM === CLEAN TEMP FILES =======================================================
 echo [INFO] Cleaning up temp files and folders...

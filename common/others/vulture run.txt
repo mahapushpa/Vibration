@@ -1,3 +1,0 @@
-| Quick start                                                                                                                                                                               
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| **Vulture** is the de-facto tool. <br>`bash<br>pip install vulture<br>vulture path/to/your/project  # plain text report<br>` <br> Add `--min-confidence 70` to ignore low-confidence hits.

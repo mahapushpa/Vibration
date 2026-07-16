@@ -13,7 +13,7 @@ REM -------- USER INPUTS: MODIFY ONLY THESE 3 LINES --------
 REM -------- Version suffix
 SET PRJ_VER=V1
 REM -------- Main Name prefix
-SET PRJ_FOLDER=VibMScope
+SET PRJ_FOLDER=VibMTool
 
 REM -------- Distrubtion Folder, where exe is created
 SET PRJ_OUT=distribution

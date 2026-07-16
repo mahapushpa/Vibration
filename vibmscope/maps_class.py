@@ -15,19 +15,19 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 #-------------------------------------------------------------------------------
 from vibmscope.vib_features     import IS_ENABLED
-from common.core.parameters     import PlotParams
-from common.core.sys_config     import get_sys_value
-from common.core.serial_comm    import ConnectionThreadManager
-from common.core.common         import get_session_flag, set_session_flag 
-from common.modules.cmd_helpers import read_single_param_direct, write_single_param_direct
-from common.utils.utils_helpers import safe_log
+from vibmshared.core.parameters     import PlotParams
+from vibmshared.core.sys_config     import get_sys_value, INI_FILE
+from vibmshared.core.serial_comm    import ConnectionThreadManager
+from vibmshared.core.common         import get_session_flag, set_session_flag 
+from vibmshared.modules.cmd_helpers import write_single_param_direct
+from vibmshared.utils.utils_helpers import safe_log
 
-from common.utils.gui_utils     import (
+from vibmshared.utils.gui_utils     import (
     CustomToolbar_tk,
     create_simple_button, bind_shortcut_pair,
     create_dropdown_button, dummy_callback_live, dummy_callback_offline,
 )
-from common.utils.status_bar    import (
+from vibmshared.utils.status_bar    import (
     update_status_bar, 
     reset_status_bar,
     StatusBarHandler,
@@ -321,7 +321,7 @@ class PlotManager:
             
             # NOTE: Using deque for ticklabels because standard set_yticklabels()
             # gets reset on set_ylim(). This approach preserves labels without re-applying.
-            ax.set_yticklabels = dq(np.linspace(-y_span, y_span, num = tick_count, dtype = np.int16))
+            ax.set_yticklabels(dq(np.linspace(-y_span, y_span, num = tick_count, dtype = np.int16)))
 
         elif (title == 'Frequency Domain'):  
             ticks = np.arange(0, PlotParams.fftXParams['max_hz'] + 1, PlotParams.get_axis_division_value('freqXMjrDiv'))   # Major ticks every 100 Hz
@@ -339,7 +339,7 @@ class PlotManager:
             ax.set_ylim(0, y_span)
             ax.yaxis.set_major_locator(FixedLocator(tick_positions))  # Y-axis ticks: 0, 0.1, 0.2, 0.3,...,1
             ax.yaxis.set_minor_locator(AutoMinorLocator(PlotParams.get_axis_division_value('freqYMnrDiv')))  # minor ticks
-            ax.set_yticklabels = dq(np.linspace(-y_span, y_span, num = tick_count, dtype = np.int16))
+            ax.set_yticklabels(dq(np.linspace(0, y_span, num = tick_count, dtype = np.int16)))
             
         else:          
             print("Plot title is not defined")
@@ -441,12 +441,20 @@ class ButtonManager:
         try:
             success = write_single_param_direct(self.cmd_handler, None, 'SYS', 'SESSION', value)
 
-        except (ValueError, TypeError):
-            raise ValueError(f"Invalid or short response while setting Session On/Off.")
+        except (ValueError, TypeError) as e:
+            # Return False rather than raise: callers only check truthiness
+            # (`if self.send_session_cmd(...): ... else: ...`) and don't catch
+            # exceptions from this call, so raising here bypassed their intended
+            # error-handling branch entirely (P2.2 Finding 4).
+            logging.error("[CMD] Invalid or short response while setting Session On/Off: %s", e)
+            return False
 
         if not success:
-            logging.error("[CMD] Failed to send Session %s command.", "On" if value else "Off")
-            raise ValueError(f"Non-ACK response for Session Command (code {success:#02x}).")
+            # `success` is a plain bool here (write_single_param_direct's return
+            # type), not a status code — formatting it as hex always printed a
+            # meaningless "0x0" and told the caller nothing (P2.2 Finding 4).
+            logging.error("[CMD] Failed to send Session %s command (no ACK).", "On" if value else "Off")
+            return False
         else:
             logging.info("[CMD] Send Session %s command.", "On" if value else "Off")
             return True
@@ -468,17 +476,30 @@ class ButtonManager:
                 self.signal_handler.close_open_files()
 
             set_session_flag('session', False)      # Keep before send_session_off to make composite call
-            set_session_flag('cmd_waiting', True)   # Mark system as waiting for a command reply
 
+            # Stop the background SerialReader thread FIRST, before issuing the
+            # synchronous stop-session command below. send_session_cmd() blocks on
+            # a direct serial_port.read() (up to CMD_TIMEOUT_SEC) from this (main)
+            # thread; if the background thread were still alive it would be
+            # concurrently calling serial_port.inWaiting()/read() on the same
+            # pyserial.Serial object, corrupting both threads' framing state
+            # (P2.2 Finding 2 — cross-thread serial read race on session stop).
+            self.stop_cb()
+
+            # NOTE: cmd_waiting is NOT set manually here. send_command() (called
+            # via send_session_cmd() below) already owns cmd_waiting's full
+            # lifecycle — setting it here too made this code a second, competing
+            # owner of the same global lock. If this instance's cmd_sent_time was
+            # recent from an unrelated prior command, that double-locking could
+            # cause send_command() to reject this very stop command as "BUSY"
+            # (P2.2 Finding 4).
             if connection == 'serial_port':
                 if self.send_session_cmd(value = 0):
                     safe_log(None, "Session stopped.", do_print = True)
                 else:
                     safe_log(None, "Session stop ACK not received.", tag = "error", do_print = True)
 
-            set_session_flag('cmd_waiting', False)
             self.buttons['s'].config(text = "Session On", relief = "raised")
-            self.stop_cb()
 
             reset_status_bar()
         
@@ -619,16 +640,25 @@ class ButtonManager:
         # Step 1: Stop Session First, if it is on
         if get_session_flag('session'):
             set_session_flag('session', False) # have this before session_off command to make composite call
-            set_session_flag('cmd_waiting', True)   # Mark system as waiting for a command reply
 
+            # Stop the background SerialReader thread FIRST, before issuing the
+            # synchronous stop-session command below, for the same reason as in
+            # session_button(): send_session_cmd() blocks on a direct
+            # serial_port.read() from this thread, and the background thread
+            # must not still be concurrently reading the same port
+            # (P2.2 Finding 2 — cross-thread serial read race on session stop).
+            self.stop_cb()
+
+            # NOTE: cmd_waiting is NOT set manually here — see the matching
+            # note in session_button() (P2.2 Finding 4: double-locking).
             if connection == 'serial_port':
                 if self.send_session_cmd(value = 0):
                     safe_log(None, "Session stopped.", do_print = True)
                 else:
-                    safe_log(None, "Session Off ACK not received.", tag = "warning", do_print = True)                    
-                set_session_flag('cmd_waiting', False)
+                    safe_log(None, "Session Off ACK not received.", tag = "warning", do_print = True)
 
-        # Step 2: Stop the serial thread before GUI actions
+        # Step 2: Stop the serial thread before GUI actions (no-op if already
+        # stopped above; still needed here for the case session wasn't running)
         self.stop_cb()
 
         # Step 3: Close Serial Port Properly, need after thread close
@@ -653,7 +683,7 @@ class ButtonManager:
             messagebox.showwarning("Reset Blocked", "Please stop the session before resetting system parameters.")
             return
 
-        ini_file = os.path.join(self.tf_handler.config_path, "maps_sys.ini")
+        ini_file = os.path.join(self.tf_handler.config_path, INI_FILE)
 
         if not os.path.exists(ini_file):
             messagebox.showinfo("No Action Needed", "System is already at default settings.")
@@ -661,7 +691,7 @@ class ButtonManager:
 
         confirm = messagebox.askyesno(
             "Confirm Reset",
-            "This will delete 'maps_sys.ini'.\n"
+            f"This will delete '{INI_FILE}'.\n"
             "Default parameters will be restored on next launch.\n\n"
             "Do you want to continue?"
         )
@@ -670,7 +700,7 @@ class ButtonManager:
 
         try:
             os.remove(ini_file)
-            logging.info("[SYSTEM] maps_sys.ini deleted — system will reset to defaults on next launch.")
+            logging.info(f"[SYSTEM] {INI_FILE} deleted — system will reset to defaults on next launch.")
             update_status_bar("System", "Reset requested — restart required", tone="gui")
             messagebox.showinfo("Reset Complete", "System reset to defaults.\nApplication will now exit.")
             self.root_window.destroy()  # clean Tk exit
@@ -678,8 +708,8 @@ class ButtonManager:
 
             # messagebox.showinfo("Reset Complete", "System reset to defaults.\nPlease restart the application.")
         except Exception as e:
-            logging.error("[SYSTEM] Failed to delete maps_sys.ini: %s", e)
-            messagebox.showerror("Reset Failed", f"Could not delete maps_sys.ini:\n{e}")
+            logging.error(f"[SYSTEM] Failed to delete {INI_FILE}: %s", e)
+            messagebox.showerror("Reset Failed", f"Could not delete {INI_FILE}:\n{e}")
 
 #-------------------------------------------------------------------------------
 # Optional Self-Test Block

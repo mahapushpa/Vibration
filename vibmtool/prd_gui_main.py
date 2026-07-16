@@ -10,12 +10,12 @@ from   functools import partial
 from   datetime import datetime
 
 #-------------------------------------------------------------------------------
-from productiontool.prd_features    import IS_ENABLED
-from productiontool.prd_gui_setup   import SetupManager, SummaryDialog
-from common.core.common         import get_session_flag
-from common.modules.cmd_helpers import write_module_direct, read_module_direct
+from vibmtool.prd_features    import IS_ENABLED
+from vibmtool.prd_gui_setup   import SetupManager, SummaryDialog
+from vibmshared.core.common   import get_session_flag
+from vibmshared.modules.cmd_helpers import write_module_direct, read_module_direct
 
-from common.utils.gui_utils     import (
+from vibmshared.utils.gui_utils     import (
     CustomToolbar_tk,
     LOG_WIDGET_STYLE,
     STATUS_LABEL_STYLE,
@@ -23,7 +23,7 @@ from common.utils.gui_utils     import (
     create_simple_button, 
     create_dropdown_button,	    
 )
-from common.utils.status_bar    import (
+from vibmshared.utils.status_bar    import (
     update_status_bar, 
     reset_status_bar,
     StatusBarHandler,
@@ -141,7 +141,9 @@ class ButtonManager:
     #---------------------------------------------------------------------------
     def create_dropdown_buttons(self):
         if IS_ENABLED("ENABLE_SETUP_DROPDOWN"):
-            create_dropdown_button(
+            # NOTE: key 'd' collides with the "Device Setup" button shortcut —
+            # rekey this dropdown before ever enabling the flag ([T3] note).
+            self.dropdowns['d'] = create_dropdown_button(
                 parent=self.toolbar,
                 label="Data Setup",
                 underline_idx=0,
@@ -155,7 +157,7 @@ class ButtonManager:
             )
 
         if IS_ENABLED("ENABLE_BRD_DROPDOWN"):
-            create_dropdown_button(
+            self.dropdowns['b'] = create_dropdown_button(
                 parent=self.toolbar,
                 label="Board",
                 underline_idx=0,
@@ -168,7 +170,7 @@ class ButtonManager:
             )
 
         if IS_ENABLED("ENABLE_ADC_DROPDOWN"):
-            create_dropdown_button(
+            self.dropdowns['a'] = create_dropdown_button(
                 parent=self.toolbar,
                 label="ADC",
                 underline_idx=0,
@@ -181,16 +183,17 @@ class ButtonManager:
             )
 
         if IS_ENABLED("ENABLE_SYS_DROPDOWN"):
-            create_dropdown_button(
+            # Ctrl+S belongs to the Summary button; 'y' (SYstem) is free ([T3])
+            self.dropdowns['y'] = create_dropdown_button(
                 parent=self.toolbar,
                 label="System",
-                underline_idx=0,
-                key='s', # Ctrl+S		
+                underline_idx=1,
+                key='y', # Ctrl+Y
                 item_list=[
                 ("System Set", 7, self.sys_set_button, 's'),
                 ("System Get", 7, self.sys_get_button, 'g'),
             ],
-            tooltip_msg="Ctrl+S - Select System"
+            tooltip_msg="Ctrl+Y - Select System"
             )
 		
     #---------------------------------------------------------------------------
@@ -327,6 +330,8 @@ class ButtonManager:
 
         """
         btn = self.buttons.get(key.lower()) or self.dropdowns.get(key.lower())
+        if isinstance(btn, tuple):      # dropdowns store (menu_button, menu)
+            btn = btn[0]
         if btn:
             if enabled:
                 btn.config(state='normal', fg='black')
@@ -337,6 +342,8 @@ class ButtonManager:
     def get_button_state(self, key):
         """Return True if button is enabled, False otherwise."""
         btn = self.buttons.get(key.lower()) or self.dropdowns.get(key.lower())
+        if isinstance(btn, tuple):      # dropdowns store (menu_button, menu)
+            btn = btn[0]
         return btn['state'] == 'normal' if btn else None
 
     #---------------------------------------------------------------------------

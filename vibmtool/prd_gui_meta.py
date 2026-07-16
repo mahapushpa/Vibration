@@ -68,13 +68,16 @@ META_FIELD_TOOLTIPS = {
     "firmware":      "Firmware version used in units",
 }
 
-PROGAM_KEY_TOOLTIPS = {
-    "write":  "Send selected settings to the connected device",
-    "read":   "Read selected parameters from the device",
-    "verify": "Compare INI values and device values for validation",
-    "save":   "Save current settings to a new INI file",
-    "select_all": "Select and deselect all Params",
-    "cancel": "Cancel the Operation and exit",
+# keys must equal lower-cased button labels (apply_tooltip lowercases the
+# label to look up here) — "verify"/"save report" previously never matched.
+PROGRAM_KEY_TOOLTIPS = {
+    "write":          "Send selected settings to the connected device",
+    "read":           "Read selected parameters from the device",
+    "write & verify": "Compare INI values and device values for validation",
+    "save":           "Save current settings to a new INI file",
+    "save report":    "Save the Build Verification Report to a text file",
+    "select_all":     "Select and deselect all Params",
+    "cancel":         "Cancel the Operation and exit",
 }
 
 #-------------------------------------------------------------------------------
@@ -84,7 +87,7 @@ META_MASTER_SKIP_KEYS  = {"serial_no"}
 META_DEVICE_SKIP_KEYS  = {"base_serial", "serial_no", "total_qty"}
 META_PROGRAM_SKIP_KEYS = {"base_serial", "serial_no", "total_qty"}
 
-SECTION_MASTER_SKIP   = {}
+SECTION_MASTER_SKIP   = set()
 SECTION_DEVICE_SKIP   = {"device_info"}
 SECTION_PROGRAM_SKIP  = {"device_info"}
 

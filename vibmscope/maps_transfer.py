@@ -26,62 +26,256 @@ from datetime import time as dt_time  # Avoid conflict
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 #-------------------------------------------------------------------------------
-from common.core.parameters    import PlotParams, TFParams
-from common.core.product_meta  import UserMeta, ProductMeta
-from common.core.sys_config    import sys_config_init, get_sys_value
+from vibmshared.core.parameters    import PlotParams, TFParams
+from vibmshared.core.product_meta  import UserMeta, ProductMeta
+from vibmshared.core.sys_config    import sys_config_init, get_sys_value
 
-from common.utils.status_bar    import update_status_bar
-from common.utils.plot_helpers  import set_clean_axis_ticks_labels
-from common.utils.utils_helpers import (
+from vibmshared.utils.status_bar    import update_status_bar
+from vibmshared.utils.plot_helpers  import set_clean_axis_ticks_labels
+from vibmshared.utils.utils_helpers import (
     write_table_block, write_metadata_header, write_channel_metadata_block,
     format_filter_description,
 )
 
 #-------------------------------------------------------------------------------
-class TFProcessor:
-    def __init__(self, system = None, excitation = None, display_config = None):
-        self.data_path       = get_sys_value('data_path')
-        self.config_path     = get_sys_value('config_path')
-        
-        self.use_db          = get_sys_value('use_yscale_db')
-        self.sample_rate     = get_sys_value('adc_srate')
-        self.analysis_type   = get_sys_value('analysis_type')
-        self.analysis_method = get_sys_value('analysis_method')
-        self.display_config  = display_config
+def format_data_info_metadata(meta):
+    """Reorder/merge a raw data-info dict into display order. Pure function
+    (no session state) — used by both text/CSV export and PDF report."""
+    formatted = {}
 
-        self.sys = system
-        self.exc = excitation
-        self.input_signals  = []
-        self.output_signals = []
-        self.filename_npz = None
+    # Step 1: Pre-merged passthrough keys (appear first)
+    pre_keys = [
+        "Serial Number",
+        "No of Channels",
+        "Sampling Rate"
+    ]
 
-        if get_sys_value('simulation_mode'):
-            if self.exc is None or self.sys is None:
-                raise ValueError("system and excitation parameters are required in simulation mode.")
+    # Step 2: Merged entries
+    merged_entries = {
+        "Notch Filter/Freq": f"{meta['Notch Filter']} @ {meta['Notch Freq']}",
+        "Start Date/Time":   f"{meta['Start Date']} {meta['Start Time']}",
+        "Stop Date/Time":    f"{meta['Stop Date']} {meta['Stop Time']}",
+    }
 
-            duration_sec = int(self.exc.duration)
-            hours, rem = divmod(duration_sec, 3600)
-            minutes, seconds = divmod(rem, 60)
+    # Step 3: Post-merged passthrough keys (appear after)
+    post_keys = [
+        "Captured Duration",
+        "Ref Channel"
+    ]
 
-            # Get base datetime once
-            start_dt = datetime.now()
-            stop_dt  = start_dt + timedelta(seconds = self.exc.duration)
+    # Add pre keys
+    for key in pre_keys:
+        if key in meta:
+            formatted[key] = meta[key]
 
-            self.start_date  = start_dt.strftime("%d %b %Y")
-            self.start_time  = start_dt.strftime("%H:%M:%S")
-            self.stop_date   = stop_dt.strftime("%d %b %Y")
-            self.stop_time   = stop_dt.strftime("%H:%M:%S")
-            self.duration    = dt_time(hour = hours, minute = minutes, second = seconds).strftime("%H:%M:%S")
+    # Add merged keys
+    formatted.update(merged_entries)
 
-        else:
-            self.start_date = None
-            self.start_time = None
-            self.stop_date  = None
-            self.stop_time  = None
-            self.duration   = None
+    # Add post keys
+    for key in post_keys:
+        if key in meta:
+            formatted[key] = meta[key]
+
+    return formatted
 
 #-------------------------------------------------------------------------------
-    def extract_signals(self, file_path_txt):
+class TFCurveFitter:
+    """Signal-processing / curve-fitting utilities for transfer-function
+    analysis: FFT-based TF computation, system-order estimation, and 2nd-order
+    model fitting. Depends only on numeric inputs (plus a use_db display
+    convention) — no file I/O, no plotting, reusable anywhere a TF curve
+    needs to be derived or fitted."""
+
+    def __init__(self, use_db = False):
+        self.use_db = use_db
+
+#-------------------------------------------------------------------------------
+    def compute_tf_from_signals(self, input_signals, output_signals, sample_rate, freq_start, freq_stop):
+        """FFT the input/output time signals and return the transfer-function
+        curve(s) sliced to [freq_start, freq_stop].
+        Returns: tf_freqs (1D), tf_vals (n_channels, N), tf_table (list of row tuples,
+        each row: [Freq, Ch1, Ch2, ..., TF(2/1), TF(3/1), ...])."""
+        n_fft  = len(input_signals)
+        fft_input  = np.fft.rfft(input_signals,  n = n_fft)
+        fft_output = np.fft.rfft(output_signals, n = n_fft, axis = 1)
+
+        # Identify index range for [f_start, f_stop]
+        freqs     = np.fft.rfftfreq(n_fft, d = 1/sample_rate)
+        idx_start = np.searchsorted(freqs, freq_start)
+        idx_stop  = np.searchsorted(freqs, freq_stop)
+
+        # Slice only useful region
+        tf_freqs   = freqs[idx_start:idx_stop]
+        amp_input  = np.abs(fft_input[idx_start:idx_stop])      # shape (N,)
+        amp_output = np.abs(fft_output[:, idx_start:idx_stop])  # shape (n_channels, N)
+
+        tf_vals = amp_output / np.maximum(amp_input[None, :], 1e-12)   # shape (n_channels, N)
+
+        tf_freqs = np.array(tf_freqs)
+        tf_vals  = np.array(tf_vals)
+
+        # Assemble columns
+        cols = [tf_freqs, amp_input]
+        for i in range(amp_output.shape[0]):
+            cols.append(amp_output[i])
+        for i in range(tf_vals.shape[0]):
+            cols.append(tf_vals[i])
+
+        # Transpose and zip to row-wise structure
+        tf_table = list(zip(*cols))  # Each row: [Freq, Ch1, Ch2, ..., TF(2/1), TF(3/1), ...]
+
+        return tf_freqs, tf_vals, tf_table
+
+#-------------------------------------------------------------------------------
+    def estimate_system_order(self, tf_freqs, tf_vals,
+                              min_prominence   = 0.1,
+                              min_height_ratio = 1.2,
+                              min_peak_distance= 5):
+        """
+        Estimate system order from TF data using peak-counting.
+
+        Parameters:
+            tf_freqs          : 1D array of frequency values
+            tf_vals           : 1D array of TF magnitudes (linear or dB)
+            min_prominence    : Minimum peak prominence
+            min_height_ratio  : Minimum peak height / median
+            min_peak_distance : Minimum spacing between peaks (in index)
+
+        Returns:
+            estimated_order (int) = 2 x number of valid peaks (minimum 1)
+        """
+        from scipy.signal import find_peaks
+        # Convert to linear scale if needed
+        values = tf_vals if not self.use_db else 10 ** (tf_vals / 20)
+
+        # Height threshold to avoid noise floor peaks
+        threshold = np.median(values) * min_height_ratio
+
+        # Auto-tune prominence only if the caller explicitly passes None;
+        # the default (0.1) skips this branch.
+        if min_prominence is None:
+            noise_floor = np.percentile(values, 20)
+            signal_peak = np.max(values)
+            min_prominence = max((signal_peak - noise_floor) * 0.2, 1e-6)
+
+        # Find valid peaks
+        peaks, _ = find_peaks(values,
+                              height = threshold,
+                              prominence = min_prominence,
+                              distance = min_peak_distance)
+
+        num_resonances = len(peaks)
+        return max(2 * num_resonances, 1)  # Ensure minimum order = 1
+
+#-------------------------------------------------------------------------------
+    def second_order_mag(self, f, omega_n, zeta):
+        """Magnitude response of second-order system |H(jw)|"""
+        omega = 2 * np.pi * f  # Convert Hz to rad/s
+        num = omega_n**2
+        den = np.sqrt((omega_n**2 - omega**2)**2 + (2*zeta*omega_n*omega)**2)
+        return num / den
+
+#-------------------------------------------------------------------------------
+    def find_sys_parameters(self, freqs, tf_mag, initial_guess = (10.0, 0.2)):
+        """
+        Fit a 2nd-order transfer function magnitude model to TF data.
+
+        Parameters:
+            freqs      : 1D array of frequency (Hz)
+            tf_mag     : 1D array of TF magnitude (linear, not dB)
+            initial_guess : (omega_n, zeta) initial values for fitting
+
+        Returns:
+            zeta       : Estimated damping ratio
+            f_natural  : Estimated natural frequency in Hz
+            t_nvalue   : Transmissibility at natural frequency (1 / 2ζ)
+            order      : Estimated system order (from estimate_system_order)
+        On failure, returns (None, None, None, None).
+        """
+        from scipy.optimize import curve_fit
+        
+        if self.use_db:
+            tf_mag = 10 ** (tf_mag / 20)
+
+        try:
+            order = self.estimate_system_order(freqs, tf_mag)
+            
+            popt, _ = curve_fit(self.second_order_mag, freqs, tf_mag, p0 = initial_guess, maxfev = 5000)
+
+            omega_n, zeta = popt
+            # fit_curve = self.second_order_mag(freqs, omega_n, zeta)
+            f_natural = omega_n / (2 * np.pi)
+            t_nvalue = 1 / (2 * zeta)            
+            return zeta, f_natural, t_nvalue, order
+
+        except Exception as e:
+            print(f"[fit_2nd_order_tf] Fit failed: {e}")
+            return None, None, None, None
+
+#-------------------------------------------------------------------------------
+    def compute_summary_metrics(self, tf_freqs, tf_vals, system, simulation_mode):
+        """
+        Compute per-receiver summary metrics from TF curves.
+        Supports tf_vals shape: (n_receivers, n_freqs)
+        and natural_freqs: List[float] with len == n_receivers
+
+        NOTE: when not simulation_mode, this fits each channel and writes the
+        fitted order/natural_freq/damping_ratio back onto `system` in place
+        (same side effect as the original TFProcessor.compute_summary_metrics).
+        """
+        results = []
+
+        for i in range(tf_vals.shape[0]):
+            tf = tf_vals[i]
+
+            # Peak (resonance)
+            idx_max    = np.argmax(tf)
+            f_resonant = tf_freqs[idx_max]
+            t_rmax     = tf[idx_max]
+
+            # Isolation start frequency (sub-resonant cutoff)
+            if self.use_db:
+                idx_iso = np.where(tf < 0)[0]
+            else:
+                idx_iso = np.where(tf < 1.0)[0]
+
+            f_iso = tf_freqs[idx_iso[0]] if idx_iso.size > 0 else None
+
+            # Value at natural frequency
+            if simulation_mode:
+                f_natural = system.natural_freq[i]
+                idx       = np.argmin(np.abs(tf_freqs - f_natural))
+                t_nvalue  = tf[idx]
+                damping_ratio = system.damping_ratio[i]
+                order     = system.order[i]
+                
+            else:
+                damping_ratio, f_natural, t_nvalue, order = self.find_sys_parameters(tf_freqs, tf, initial_guess = (15, 0.2))
+
+                system.order[i] = order               
+                system.natural_freq[i] = f_natural
+                system.damping_ratio[i] = damping_ratio
+                             
+            # Store all relevant values (double () are needed here)
+            results.append((f_resonant, t_rmax, f_iso, f_natural, t_nvalue, damping_ratio, order))
+
+        return results  # List of tuples
+
+#-------------------------------------------------------------------------------
+class TFSignalIO:
+    """File I/O for transfer-function capture sessions: parsing raw device
+    TXT exports, and saving/loading the binary .npz + text/CSV report
+    formats. No curve-fitting or plotting dependency — reusable anywhere a
+    capture needs to be read from or written to disk."""
+
+    def __init__(self, data_path):
+        self.data_path = data_path
+
+#-------------------------------------------------------------------------------
+    def parse_txt_export(self, file_path_txt):
+        """Parse a raw device TXT export into signals + timing metadata.
+        Returns a dict: input_signals, output_signals, start_date, start_time,
+        stop_date, stop_time, duration, timestamp."""
         with open(file_path_txt, "r") as f:
             lines = f.readlines()
 
@@ -114,20 +308,16 @@ class TFProcessor:
             dt_start = datetime.strptime(f"{start_date} {start_time}", "%d %b %Y %H:%M:%S")
             dt_stop  = datetime.strptime(f"{stop_date} {stop_time}", "%d %b %Y %H:%M:%S")
             duration_sec = int((dt_stop - dt_start).total_seconds())
-            # duration_sec = int(self.exc.duration)
             hours, rem = divmod(duration_sec, 3600)
             minutes, seconds = divmod(rem, 60)
             duration_hms = dt_time(hour = hours, minute = minutes, second = seconds).strftime("%H:%M:%S")
         except Exception as e:
             raise ValueError(f"[ERROR] Could not parse duration from header: {e}")
 
-        self.duration   = duration_hms    
-        self.start_date = start_date
-        self.start_time = start_time
-        self.stop_date  = stop_date
-        self.stop_time  = stop_time
-        
         # Parse data section
+        if data_start_idx is None:
+            raise ValueError("[ERROR] Malformed TXT input: no 'Chn(' header line found — cannot locate start of data section.")
+
         for line in lines[data_start_idx:]:
             line = line.strip()
             if line:
@@ -138,135 +328,67 @@ class TFProcessor:
         full_data = np.array(data_lines, dtype = np.int16)
 
         # Extract input/output
-        self.input_signals = full_data[:, 0]                     # 1D array: (n_samples,)
-        self.output_signals = full_data[:, 1:].T                 # 2D array: (n_channels - 1, n_samples)
+        input_signals  = full_data[:, 0]                     # 1D array: (n_samples,)
+        output_signals = full_data[:, 1:].T                  # 2D array: (n_channels - 1, n_samples)
 
         timestamp = dt_start.strftime("%y%m%d_%H%M%S")
-        filename_npz = os.path.join(self.data_path, f"tf_{timestamp}.npz")
-            
-        self.save_signal_to_npz(filename_npz, timestamp)
-        self.process_npz_data()
-    
+
+        return {
+            'input_signals':  input_signals,
+            'output_signals': output_signals,
+            'start_date': start_date, 'start_time': start_time,
+            'stop_date':  stop_date,  'stop_time':  stop_time,
+            'duration':   duration_hms,
+            'timestamp':  timestamp,
+        }
+
 #-------------------------------------------------------------------------------
-    def save_signal_to_npz(self, filename_npz, timestamp):
-        # Prepare metadata
-        user_meta           = UserMeta(self.config_path)
-        user_info_block     = user_meta.get_user_info_block()
-        data_info_block     = self.get_data_info_block()
-        input_info_block    = self.get_input_info_block()
-        tf_info_block       = self.get_tf_info_block()
-        process_info_block  = self.process_info_block()
-        analysis_info_block = self.analysis_info_block()
-    
-        # Save binary .npz
+    def save_signal_to_npz(self, filename_npz, timestamp, blocks, input_signals, output_signals):
+        """blocks: dict with keys user_info_block, data_info_block,
+        input_info_block, tf_info_block, process_info_block, analysis_info_block."""
         np.savez_compressed(filename_npz,
             timestamp           = timestamp,
-            user_info_block     = user_info_block,
-            data_info_block     = data_info_block,
-            input_info_block    = input_info_block,
-            tf_info_block       = tf_info_block,
-            process_info_block  = process_info_block,
-            analysis_info_block = analysis_info_block,
-            input_signals       = self.input_signals,
-            output_signals      = self.output_signals,
+            user_info_block     = blocks['user_info_block'],
+            data_info_block     = blocks['data_info_block'],
+            input_info_block    = blocks['input_info_block'],
+            tf_info_block       = blocks['tf_info_block'],
+            process_info_block  = blocks['process_info_block'],
+            analysis_info_block = blocks['analysis_info_block'],
+            input_signals       = input_signals,
+            output_signals      = output_signals,
         )
-        
-        self.filename_npz = filename_npz
         print(f"[INFO] Saved npz file: {os.path.basename(filename_npz)}")
 
 #-------------------------------------------------------------------------------
-    def process_npz_data(self, filename = None, export = False):
-        if filename is None:
-            filename_npz = self.filename_npz
-        else:
-            filename_npz = filename
-            
-        # Read the NPZ file to process
+    def load_npz(self, filename_npz):
+        """Load a saved .npz capture, returning raw blocks + signals.
+        Missing user_info_block degrades to a plain string instead of raising."""
         data = np.load(filename_npz, allow_pickle = True)
 
         timestamp = data.get('timestamp')
-        user_info_block = data.get('user_info_block', "User Information: N/A").item()
-        data_info_block = data['data_info_block'].item()
-        input_info_block= data['input_info_block'].item()
-        tf_info_block   = data['tf_info_block'].item()
-        process_info_block = data['process_info_block'].item()
+        if 'user_info_block' in data:
+            user_info_block = data['user_info_block'].item()
+        else:
+            user_info_block = "User Information: N/A"
 
-        # Update post info
-        process_info_block['Processed On'] = datetime.now().strftime("%d %b %Y, %H:%M:%S") 
-        process_info_block['Input File']   = os.path.basename(filename_npz)
-
-        analysis_info_block = data['analysis_info_block'].item()
-        
-        freq_start   = analysis_info_block['freq_start']
-        freq_stop    = analysis_info_block['freq_stop']
-        sample_rate  = analysis_info_block['sample_rate']
-        natural_freq = analysis_info_block['natural_freq']
-        analysis_type   = analysis_info_block['analysis_type']
-        analysis_method = analysis_info_block['analysis_method']
-
-        input  = data['input_signals']
-        output = data['output_signals']
-
-        # Full FFT
-        n_fft  = len(input)
-        fft_input  = np.fft.rfft(input,  n = n_fft)
-        fft_output = np.fft.rfft(output, n = n_fft, axis = 1)
-
-        # Identify index range for [f_start, f_stop]
-        freqs     = np.fft.rfftfreq(n_fft, d = 1/sample_rate)
-        idx_start = np.searchsorted(freqs, freq_start)
-        idx_stop  = np.searchsorted(freqs, freq_stop)
-
-        # Slice only useful region
-        tf_freqs = []
-        tf_vals  = []
-        tf_table = []
-
-        tf_freqs   = freqs[idx_start:idx_stop]
-        amp_input  = np.abs(fft_input[idx_start:idx_stop])      # shape (N,)
-        amp_output = np.abs(fft_output[:, idx_start:idx_stop])  # shape (n_channels, N)
-
-        tf_vals = amp_output / np.maximum(amp_input[None, :], 1e-12)   # shape (n_channels, N)
-
-        tf_freqs = np.array(tf_freqs)
-        tf_vals  = np.array(tf_vals)
-        tf_table = np.array(tf_table)
-        
-        # Assemble columns
-        cols = [tf_freqs, amp_input]
-        for i in range(amp_output.shape[0]):
-            cols.append(amp_output[i])
-        for i in range(tf_vals.shape[0]):
-            cols.append(tf_vals[i])
-
-        # Transpose and zip to row-wise structure
-        tf_table = list(zip(*cols))  # Each row: [Freq, Ch1, Ch2, ..., TF(2/1), TF(3/1), ...]
-        
-        # Save data in text or csv format
-        if export:
-            txt_name = os.path.join(self.data_path, f"tf_{timestamp}.txt")
-            csv_name = os.path.join(self.data_path, f"tf_{timestamp}.csv")
-            self.save_to_text_csv(txt_name, user_info_block, data_info_block,
-                                    input_info_block, tf_info_block, process_info_block, 
-                                    tf_table, csv_mode = False)
-
-            self.save_to_text_csv(csv_name, user_info_block, data_info_block,
-                                    input_info_block, tf_info_block, process_info_block, 
-                                    tf_table, csv_mode = True)
-            print(f"[INFO] Processed file: {os.path.basename(filename_npz)} for CSV and Text mode")
-            return
-        
-        pdf_name = os.path.join(self.data_path, f"tf_{timestamp}.pdf")
-        self.save_to_pdf_sceen(pdf_name, data_info_block, input_info_block, tf_info_block,
-                             process_info_block, tf_freqs, tf_vals, analysis_type)
-
-        print(f"[INFO] Processed file: {os.path.basename(filename_npz)}")
+        return {
+            'timestamp':            timestamp,
+            'user_info_block':      user_info_block,
+            'data_info_block':      data['data_info_block'].item(),
+            'input_info_block':     data['input_info_block'].item(),
+            'tf_info_block':        data['tf_info_block'].item(),
+            'process_info_block':   data['process_info_block'].item(),
+            'analysis_info_block':  data['analysis_info_block'].item(),
+            'input_signals':        data['input_signals'],
+            'output_signals':       data['output_signals'],
+        }
 
 #-------------------------------------------------------------------------------
-    def save_to_text_csv(self, file_name, user_info_block, data_info_block, 
-                                input_info_block, tf_info_block, process_info_block, 
+    def save_to_text_csv(self, file_name, user_info_block, data_info_block,
+                                input_info_block, tf_info_block, process_info_block,
                                 tf_table, csv_mode = False):
-        data_info_block = self.format_data_info_metadata(data_info_block)                                
+        """Note: data_info_block is expected already formatted (see
+        format_data_info_metadata) — the caller formats it, this method just writes."""
         # based on csv_mode, it will save in text mode or csv mode
         with open(file_name, 'w', encoding='utf-8') as f:
             f.write(user_info_block + "\n")
@@ -287,7 +409,53 @@ class TFProcessor:
         print(f"[INFO] Saved txt file: {os.path.basename(file_name)}")
 
 #-------------------------------------------------------------------------------
-    def save_to_pdf_sceen(self, file_name, data_block, input_block, tf_block, 
+class TFReportPlotter:
+    """Renders a TF capture as a screen figure and/or an A4 PDF report.
+    Needs only a TFCurveFitter (for the summary-metrics info box) and a
+    system-parameters reference — no file-parsing or npz dependency."""
+
+    # Screen is resized dynamically by the window manager; PDF targets a
+    # fixed A4 page. The two outputs were intentionally tuned differently
+    # (font sizes, and per-channel vs. combined info-box layout) — this
+    # table replaces what used to be two ~150-line near-duplicate methods
+    # (insert_plot_ax_pdf / insert_plot_ax_screen) with one method + this
+    # lookup, without changing either output's tuned appearance.
+    PLOT_STYLE = {
+        'screen': {
+            'title_size':       12,
+            'label_size':       10,
+            'major_tick_size':   8,
+            'minor_tick_size':   6,
+            'text_font_size':    6,
+            'box_mode':         'combined',  # one box summarizing all channels
+            'box_pos':          (0.995, 0.99),
+            'box_edgecolor':    'red',
+            'box_kwargs':       {'facecolor': 'white', 'boxstyle': 'round, pad = 0.2', 'linewidth': 0.8},
+        },
+        'pdf': {
+            'title_size':       13,
+            'label_size':       11,
+            'major_tick_size':  10,
+            'minor_tick_size':   6,
+            'text_font_size':    6,
+            'box_mode':         'per_channel',  # one box per channel, edge-colored to match its curve
+            'box_pos':          (0.99, 0.99),
+            'box_y_step':        0.18,
+            'box_kwargs':       {'facecolor': 'white', 'boxstyle': 'round, pad = 0.2'},
+        },
+    }
+
+    LINESTYLES      = ['-', '--', '-.', ':', (0, (3, 1, 1, 1)), (0, (5, 2, 2, 2)), (0, (1, 1)), (0, (2, 1))]  # Extended to support 8
+    LINESTYLE_DESC  = ['-', '--', '-.', ':', 'dashdot', 'loosely dashdotted', 'densely dotted', 'loosely dotted']
+
+    def __init__(self, fitter, system, display_config = None, use_db = False):
+        self.fitter          = fitter
+        self.system           = system
+        self.display_config  = display_config
+        self.use_db           = use_db
+
+#-------------------------------------------------------------------------------
+    def save_to_pdf_screen(self, file_name, data_block, input_block, tf_block, 
                             process_block, tf_freqs, tf_vals, analysis_type):
 
         xlabel = 'Frequency (Hz)'
@@ -295,7 +463,6 @@ class TFProcessor:
         if self.use_db:
             tf_vals = 20 * np.log10(tf_vals + 1e-12)  # Avoid log(0)
 
-        # ProductMeta.configure('VibMScope')  # or 'VibrationAnalyser', 'VibMScope', 'VibMTool'
         product_name = ProductMeta.get_title()
 
         # screen should be before pdf, otherwise, pdf property are distrubing the screen
@@ -326,12 +493,12 @@ class TFProcessor:
         self.insert_product_logo(ax_logo, product_name)
 
         # Plot Area block
-        self.insert_plot_ax_pdf(ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type)
+        self.insert_plot_ax(ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type, output_type = 'pdf')
 
         # Metadata block
         ax_text.axis("off")  # Remove all ticks and lines
         
-        data_info_block = self.format_data_info_metadata(data_info_block)
+        data_info_block = format_data_info_metadata(data_info_block)
         
         y_cursor = 0.98 # y axis start point
         line_spacing = 0.030
@@ -375,7 +542,7 @@ class TFProcessor:
         product_icon = ProductMeta.get_icon()
         fig_screen.canvas.manager.set_window_title(product_name)
         fig_screen.canvas.manager.window.iconbitmap(product_icon)
-        self.insert_plot_ax_screen(ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type)
+        self.insert_plot_ax(ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type, output_type = 'screen')
         fig_screen.canvas.manager.window.state('zoomed')
         fig_screen.set_snap(True)
 
@@ -390,157 +557,91 @@ class TFProcessor:
         update_status_bar("TF", remove = True)
     
 #-------------------------------------------------------------------------------
-    def insert_plot_ax_pdf(self, ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type):
+    def insert_plot_ax(self, ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type, output_type):
+        """Draw TF curves + summary info box(es) onto ax_plot.
+        output_type: 'screen' or 'pdf' — selects sizing and box layout from PLOT_STYLE."""
+        style = self.PLOT_STYLE[output_type]
 
         legend_map = {}
-        linestyles = ['-', '--', '-.', ':', (0, (3, 1, 1, 1)), (0, (5, 2, 2, 2)), (0, (1, 1)), (0, (2, 1))]  # Extended to support 8
-
         for i in range(tf_vals.shape[0]):
             ch_id = i + 2  # Receiver channel index
-            linestyle = linestyles[i % len(linestyles)]
+            linestyle = self.LINESTYLES[i % len(self.LINESTYLES)]
             line, = ax_plot.plot(tf_freqs, tf_vals[i], linestyle = linestyle, linewidth = 1.0, label = f"TF(Ch{ch_id}/Ch1)")
             legend_map[i] = line.get_color()
 
-        ax_plot.tick_params(axis='both', which='major', labelsize = 10)
-        ax_plot.tick_params(axis='both', which='minor', labelsize = 6)
-        ax_plot.grid(which='major', linestyle = '-',  linewidth = 0.7, alpha = 0.9, color = 'black')
-        ax_plot.grid(which='minor', linestyle = '--', linewidth = 0.4, alpha = 0.5, color = 'gray')
+        ax_plot.tick_params(axis = 'both', which = 'major', labelsize = style['major_tick_size'])
+        ax_plot.tick_params(axis = 'both', which = 'minor', labelsize = style['minor_tick_size'])
+        ax_plot.grid(which = 'major', linestyle = '-',  linewidth = 0.7, alpha = 0.9, color = 'black')
+        ax_plot.grid(which = 'minor', linestyle = '--', linewidth = 0.4, alpha = 0.5, color = 'gray')
         set_clean_axis_ticks_labels(ax_plot, (np.min(tf_freqs), np.max(tf_freqs)), axis = 'x', num_ticks = 5,  step_hint = 20, num_minor = 4)
         set_clean_axis_ticks_labels(ax_plot, (np.min(tf_vals),  np.max(tf_vals)),  axis = 'y', num_ticks = 10)
-        
+
         # Labels & Title
         plot_title = TFParams.get_plot_title(analysis_type)
-        ax_plot.set_xlabel(xlabel, fontsize = 11, fontweight = "bold", family = 'Segoe UI')
-        ax_plot.set_ylabel(ylabel, fontsize = 11, fontweight = "bold", family = 'Segoe UI')
-        ax_plot.set_title(plot_title, fontsize = 13, fontweight = "bold", family = 'Segoe UI')
-        
-        # Info box
-        metrics_list = self.compute_summary_metrics(tf_freqs, tf_vals)
+        ax_plot.set_xlabel(xlabel, fontsize = style['label_size'], fontweight = "bold", family = 'Segoe UI')
+        ax_plot.set_ylabel(ylabel, fontsize = style['label_size'], fontweight = "bold", family = 'Segoe UI')
+        ax_plot.set_title(plot_title, fontsize = style['title_size'], fontweight = "bold", family = 'Segoe UI')
 
-        y_cursor = 0.99
-        text_color_info = 'black'  # default text color
-        linestyles_map = ['-', '--', '-.', ':', 'dashdot', 'loosely dashdotted', 'densely dotted', 'loosely dotted']
-        for i, (f_resonant, t_rmax, f_iso, f_natural, t_nvalue, damping_ratio, order) in enumerate(metrics_list):
-            ch_id = i + 2
-            color = legend_map[i]
-            linestyle_desc = linestyles_map[i % len(linestyles_map)]
+        # Info box(es)
+        metrics_list = self.fitter.compute_summary_metrics(
+            tf_freqs, tf_vals, self.system, get_sys_value('simulation_mode'))
+        box_x, box_y = style['box_pos']
 
-            iso_text     = f'{f_iso:5.2f} Hz'      if f_iso is not None else '--'
-            order_text   = f'{order:5.2f}'         if order is not None else '--'
-            damping_text = f'{damping_ratio:5.2f}' if damping_ratio is not None else '--'
-            natural_text = f'{f_natural:5.2f} Hz'  if f_natural is not None else '--'
-            nvalue_text  = f'{t_nvalue:5.2f}'      if t_nvalue is not None else '--'
-            expanded_style = self.style_preview(linestyle_desc)
+        if style['box_mode'] == 'per_channel':
+            y_cursor = box_y
+            for i, metrics in enumerate(metrics_list):
+                ax_plot.text(
+                    box_x, y_cursor, self._format_metrics_block(i, metrics),
+                    transform = ax_plot.transAxes,
+                    verticalalignment = 'top', horizontalalignment = 'right',
+                    bbox = dict(edgecolor = legend_map[i], **style['box_kwargs']),  # matches this channel's curve color
+                    fontsize = style['text_font_size'], family = 'DejaVu Sans Mono',
+                    color = 'black',
+                )
+                y_cursor -= style['box_y_step']
 
-            lines = [
-                f"{' Transmissibility :':<20}{f'Ch{ch_id}/Ch1':<9}",
-                f"{' System Order     :':<20}{order_text:<9}",
-                f"{' Damping Ratio    :':<20}{damping_text:<9}",
-                f"{' Natural Freq     :':<20}{natural_text:<9}",
-                f"{' Peak at Natural  :':<20}{nvalue_text:<9}",
-                f"{' Resonant Freq    :':<20}{f'{f_resonant:5.2f} Hz':<9}",
-                f"{' Peak at Resonant :':<20}{f'{t_rmax:5.2f}':<9}",
-                f"{' Isolation Begins :':<20}{iso_text:<9}",
-                f"{' Line Style       :':<20}{expanded_style:<9}",
-            ]
-
-            block = "\n".join(lines)
+        else:  # 'combined': one box summarizing every channel
+            text_blocks = []
+            for i, metrics in enumerate(metrics_list):
+                text_blocks.extend(self._format_metrics_block(i, metrics).split("\n"))
+                text_blocks.append("")
+            summary_block = "\n".join(text_blocks).rstrip("\n")
 
             ax_plot.text(
-                0.99, y_cursor, block,
+                box_x, box_y, summary_block,
                 transform = ax_plot.transAxes,
                 verticalalignment = 'top', horizontalalignment = 'right',
-                bbox = dict(
-                    edgecolor = color,          # plot-matching boundary
-                    facecolor = 'white',
-                    boxstyle  = 'round, pad = 0.2',
-                ),
-                fontsize = 6, family = 'DejaVu Sans Mono',
-                color = text_color_info         # default text color
+                bbox = dict(edgecolor = style['box_edgecolor'], **style['box_kwargs']),
+                fontsize = style['text_font_size'], family = 'DejaVu Sans Mono',
+                color = 'black',
             )
-            y_cursor -= 0.18
-                     
+
 #-------------------------------------------------------------------------------
-    def insert_plot_ax_screen(self, ax_plot, tf_freqs, tf_vals, xlabel, ylabel, analysis_type):
-        title_size = 12
-        label_size = 10
-        major_tick_size = 8
-        minor_tick_size = 6
-        text_font_size  = 6
+    def _format_metrics_block(self, i, metrics):
+        """Format one channel's resonance/damping/isolation summary as text lines."""
+        f_resonant, t_rmax, f_iso, f_natural, t_nvalue, damping_ratio, order = metrics
+        ch_id = i + 2
+        linestyle_desc = self.LINESTYLE_DESC[i % len(self.LINESTYLE_DESC)]
 
-        linestyles = ['-', '--', '-.', ':', (0, (3, 1, 1, 1)), (0, (5, 2, 2, 2)), (0, (1, 1)), (0, (2, 1))]  # Extended to support 8
+        iso_text     = f'{f_iso:5.2f} Hz'      if f_iso is not None else '--'
+        order_text   = f'{order:5.2f}'         if order is not None else '--'
+        damping_text = f'{damping_ratio:5.2f}' if damping_ratio is not None else '--'
+        natural_text = f'{f_natural:5.2f} Hz'  if f_natural is not None else '--'
+        nvalue_text  = f'{t_nvalue:5.2f}'      if t_nvalue is not None else '--'
+        expanded_style = self.style_preview(linestyle_desc)
 
-        # Plot each TF curve with auto line style
-        for i in range(tf_vals.shape[0]):
-            ch_id = i + 2
-            linestyle = linestyles[i % len(linestyles)]
-            ax_plot.plot(tf_freqs, tf_vals[i], linestyle = linestyle, linewidth = 1.0, label = f"TF(Ch{ch_id}/Ch1)")
-
-        # Axis settings
-        ax_plot.tick_params(axis='both', which='major', labelsize=major_tick_size)
-        ax_plot.tick_params(axis='both', which='minor', labelsize=minor_tick_size)
-        ax_plot.grid(which='major', linestyle='-',  linewidth=0.7, alpha=0.9, color='black')
-        ax_plot.grid(which='minor', linestyle='--', linewidth=0.4, alpha=0.5, color='gray')
-
-        set_clean_axis_ticks_labels(ax_plot, (np.min(tf_freqs), np.max(tf_freqs)), axis='x', num_ticks=5, step_hint=20, num_minor=4)
-        set_clean_axis_ticks_labels(ax_plot, (np.min(tf_vals),  np.max(tf_vals)),  axis='y', num_ticks=10)
-
-        # Labels and title
-        plot_title = TFParams.get_plot_title(analysis_type)
-        ax_plot.set_xlabel(xlabel, fontsize=label_size, fontweight="bold", family='Segoe UI')
-        ax_plot.set_ylabel(ylabel, fontsize=label_size, fontweight="bold", family='Segoe UI')
-        ax_plot.set_title(plot_title, fontsize=title_size, fontweight="bold", family='Segoe UI')
-
-        # Metrics summary box (single combined block)
-        metrics_list = self.compute_summary_metrics(tf_freqs, tf_vals)
-        # dpi    = self.display_config["dpi"]
-        # height = self.display_config["height_in"]
-
-        # Build full summary text block
-        text_blocks = []
-        linestyles_map = ['-', '--', '-.', ':', 'dashdot', 'loosely dashdotted', 'densely dotted', 'loosely dotted']
-
-        for i, (f_resonant, t_rmax, f_iso, f_natural, t_nvalue, damping_ratio, order) in enumerate(metrics_list):
-            ch_id = i + 2
-            linestyle_desc = linestyles_map[i % len(linestyles_map)]
-
-            iso_text     = f'{f_iso:5.2f} Hz'      if f_iso is not None else '--'
-            order_text   = f'{order:5.2f}'         if order is not None else '--'
-            damping_text = f'{damping_ratio:5.2f}' if damping_ratio is not None else '--'
-            natural_text = f'{f_natural:5.2f} Hz'  if f_natural is not None else '--'
-            nvalue_text  = f'{t_nvalue:5.2f}'      if t_nvalue is not None else '--'
-            expanded_style = self.style_preview(linestyle_desc)
-
-            lines = [
-                f"{' Transmissibility :':<20}{f'Ch{ch_id}/Ch1':<9}",
-                f"{' System Order     :':<20}{order_text:<9}",
-                f"{' Damping Ratio    :':<20}{damping_text:<9}",
-                f"{' Natural Freq     :':<20}{natural_text:<9}",
-                f"{' Peak at Natural  :':<20}{nvalue_text:<9}",
-                f"{' Resonant Freq    :':<20}{f'{f_resonant:5.2f} Hz':<9}",
-                f"{' Peak at Resonant :':<20}{f'{t_rmax:5.2f}':<9}",
-                f"{' Isolation Begins :':<20}{iso_text:<9}",
-                f"{' Line Style       :':<20}{expanded_style:<9}",
-                ""
-            ]
-            text_blocks.extend(lines)
-
-        summary_block = "\n".join(text_blocks).rstrip("\n")
-
-        # Draw single combined box
-        ax_plot.text(
-            0.995, 0.99, summary_block,
-            transform = ax_plot.transAxes,
-            verticalalignment = 'top', horizontalalignment = 'right',
-            bbox=dict(
-                edgecolor = 'red',
-                facecolor = 'white',
-                boxstyle  = 'round, pad = 0.2',
-                linewidth = 0.8,    # Border thickness (default is 1.0)
-            ),
-            color = 'black',
-            fontsize = text_font_size, family='DejaVu Sans Mono'
-        )
+        lines = [
+            f"{' Transmissibility :':<20}{f'Ch{ch_id}/Ch1':<9}",
+            f"{' System Order     :':<20}{order_text:<9}",
+            f"{' Damping Ratio    :':<20}{damping_text:<9}",
+            f"{' Natural Freq     :':<20}{natural_text:<9}",
+            f"{' Peak at Natural  :':<20}{nvalue_text:<9}",
+            f"{' Resonant Freq    :':<20}{f'{f_resonant:5.2f} Hz':<9}",
+            f"{' Peak at Resonant :':<20}{f'{t_rmax:5.2f}':<9}",
+            f"{' Isolation Begins :':<20}{iso_text:<9}",
+            f"{' Line Style       :':<20}{expanded_style:<9}",
+        ]
+        return "\n".join(lines)
 
 #-------------------------------------------------------------------------------
     def style_preview(self, style):
@@ -551,134 +652,6 @@ class TFProcessor:
             ':':  '········'
         }
         return style_map.get(style, str(style) * 4)  # fallback if not found
-
-#-------------------------------------------------------------------------------
-    def estimate_system_order(self, tf_freqs, tf_vals,
-                              min_prominence   = 0.1,
-                              min_height_ratio = 1.2,
-                              min_peak_distance= 5):
-        """
-        Estimate system order from TF data using peak-counting.
-
-        Parameters:
-            tf_freqs          : 1D array of frequency values
-            tf_vals           : 1D array of TF magnitudes (linear or dB)
-            min_prominence    : Minimum peak prominence
-            min_height_ratio  : Minimum peak height / median
-            min_peak_distance : Minimum spacing between peaks (in index)
-
-        Returns:
-            estimated_order (int) = 2 × number of valid peaks (minimum 1)
-        """
-        from scipy.signal import find_peaks
-        # Convert to linear scale if needed
-        values = tf_vals if not self.use_db else 10 ** (tf_vals / 20)
-
-        # Height threshold to avoid noise floor peaks
-        threshold = np.median(values) * min_height_ratio
-
-        # Auto-set prominence if None
-        if min_prominence is None:
-            noise_floor = np.percentile(values, 20)
-            signal_peak = np.max(values)
-            min_prominence = max((signal_peak - noise_floor) * 0.2, 1e-6)
-
-        # Find valid peaks
-        peaks, _ = find_peaks(values,
-                              height = threshold,
-                              prominence = min_prominence,
-                              distance = min_peak_distance)
-
-        num_resonances = len(peaks)
-        return max(2 * num_resonances, 1)  # Ensure minimum order = 1
-
-#-------------------------------------------------------------------------------
-    def second_order_mag(self, f, omega_n, zeta):
-        """Magnitude response of second-order system |H(jω)|"""
-        omega = 2 * np.pi * f  # Convert Hz to rad/s
-        num = omega_n**2
-        den = np.sqrt((omega_n**2 - omega**2)**2 + (2*zeta*omega_n*omega)**2)
-        return num / den
-
-#-------------------------------------------------------------------------------
-    def find_sys_parameters(self, freqs, tf_mag, initial_guess = (10.0, 0.2)):
-        """
-        Fit a 2nd-order transfer function magnitude model to TF data.
-
-        Parameters:
-            freqs      : 1D array of frequency (Hz)
-            tf_mag     : 1D array of TF magnitude (linear, not dB)
-            initial_guess : (omega_n, zeta) initial values for fitting
-
-        Returns:
-            zeta         : Estimated damping ratio
-            omega_n_hz   : Estimated natural frequency in Hz
-            fit_curve    : TF curve from fitted model (for plotting)
-        """
-        from scipy.optimize import curve_fit
-        
-        if self.use_db:
-            tf_mag = 10 ** (tf_mag / 20)
-
-        try:
-            order = self.estimate_system_order(freqs, tf_mag)
-            
-            popt, _ = curve_fit(self.second_order_mag, freqs, tf_mag, p0 = initial_guess, maxfev = 5000)
-
-            omega_n, zeta = popt
-            # fit_curve = self.second_order_mag(freqs, omega_n, zeta)
-            f_natural = omega_n / (2 * np.pi)
-            t_nvalue = 1 / (2 * zeta)            
-            return zeta, f_natural, t_nvalue, order
-
-        except Exception as e:
-            print(f"[fit_2nd_order_tf] Fit failed: {e}")
-            return None, None, None, None
-
-#-------------------------------------------------------------------------------
-    def compute_summary_metrics(self, tf_freqs, tf_vals):
-        """
-        Compute per-receiver summary metrics from TF curves.
-        Supports tf_vals shape: (n_receivers, n_freqs)
-        and natural_freqs: List[float] with len == n_receivers
-        """
-        results = []
-
-        for i in range(tf_vals.shape[0]):
-            tf = tf_vals[i]
-
-            # Peak (resonance)
-            idx_max    = np.argmax(tf)
-            f_resonant = tf_freqs[idx_max]
-            t_rmax     = tf[idx_max]
-
-            # Isolation start frequency (sub-resonant cutoff)
-            if self.use_db:
-                idx_iso = np.where(tf < 0)[0]
-            else:
-                idx_iso = np.where(tf < 1.0)[0]
-
-            f_iso = tf_freqs[idx_iso[0]] if idx_iso.size > 0 else None
-
-            # Value at natural frequency
-            if get_sys_value('simulation_mode'):
-                f_natural = self.sys.natural_freq[i]
-                idx       = np.argmin(np.abs(tf_freqs - f_natural))
-                t_nvalue  = tf[idx]
-                damping_ratio = self.sys.damping_ratio[i]
-                order     = self.sys.order[i]
-                
-            else:
-                damping_ratio, f_natural, t_nvalue, order = self.find_sys_parameters(tf_freqs, tf, initial_guess = (15, 0.2))
-
-                self.sys.order[i] = order               
-                self.sys.natural_freq[i] = f_natural
-                self.sys.damping_ratio[i] = damping_ratio
-                             
-            # Store all relevant values (double () are needed here)
-            results.append((f_resonant, t_rmax, f_iso, f_natural, t_nvalue, damping_ratio, order))
-
-        return results  # List of tuples
 
 #-------------------------------------------------------------------------------
     def insert_product_logo(self, ax_logo, product_name):
@@ -704,49 +677,151 @@ class TFProcessor:
                     fontsize=12, va='top', ha='right', transform=ax_logo.transAxes)        
 
 #-------------------------------------------------------------------------------
-    def format_data_info_metadata(self, meta):
-        formatted = {}
+class TFProcessor:
+    """Orchestrates one transfer-function capture session: owns the session
+    state (system/excitation params, capture timing, raw signals) and
+    composes TFCurveFitter / TFSignalIO / TFReportPlotter to do the actual
+    parsing, math, and rendering. Public API kept identical to before the
+    split — external callers (vibmscope.py, maps_class.py) are unaffected."""
 
-        # Step 1: Pre-merged passthrough keys (appear first)
-        pre_keys = [
-            "Serial Number",
-            "No of Channels",
-            "Sampling Rate"
-        ]
+    def __init__(self, system = None, excitation = None, display_config = None):
+        self.data_path       = get_sys_value('data_path')
+        self.config_path     = get_sys_value('config_path')
+        
+        self.use_db          = get_sys_value('use_yscale_db')
+        self.sample_rate     = get_sys_value('adc_srate')
+        self.analysis_type   = get_sys_value('analysis_type')
+        self.analysis_method = get_sys_value('analysis_method')
+        self.display_config  = display_config
 
-        # Step 2: Merged entries
-        merged_entries = {
-            "Notch Filter/Freq": f"{meta['Notch Filter']} @ {meta['Notch Freq']}",
-            "Start Date/Time":   f"{meta['Start Date']} {meta['Start Time']}",
-            "Stop Date/Time":    f"{meta['Stop Date']} {meta['Stop Time']}",
+        self.sys = system
+        self.exc = excitation
+        self.input_signals  = []
+        self.output_signals = []
+        self.filename_npz = None
+
+        if get_sys_value('simulation_mode'):
+            if self.exc is None or self.sys is None:
+                raise ValueError("system and excitation parameters are required in simulation mode.")
+
+            duration_sec = int(self.exc.duration)
+            hours, rem = divmod(duration_sec, 3600)
+            minutes, seconds = divmod(rem, 60)
+
+            # Get base datetime once
+            start_dt = datetime.now()
+            stop_dt  = start_dt + timedelta(seconds = self.exc.duration)
+
+            self.start_date  = start_dt.strftime("%d %b %Y")
+            self.start_time  = start_dt.strftime("%H:%M:%S")
+            self.stop_date   = stop_dt.strftime("%d %b %Y")
+            self.stop_time   = stop_dt.strftime("%H:%M:%S")
+            self.duration    = dt_time(hour = hours, minute = minutes, second = seconds).strftime("%H:%M:%S")
+
+        else:
+            self.start_date = None
+            self.start_time = None
+            self.stop_date  = None
+            self.stop_time  = None
+            self.duration   = None
+
+        # Composed helpers — split out of what used to be one ~700-line
+        # class. Each is independently reusable: TFCurveFitter has no file/
+        # plot dependency, TFSignalIO has no plotting dependency, and
+        # TFReportPlotter only needs a fitter + system reference.
+        self._fitter  = TFCurveFitter(use_db = self.use_db)
+        self._io      = TFSignalIO(data_path = self.data_path)
+        self._plotter = TFReportPlotter(
+            fitter          = self._fitter,
+            system          = self.sys,
+            display_config  = self.display_config,
+            use_db          = self.use_db,
+        )
+
+#-------------------------------------------------------------------------------
+    def extract_signals(self, file_path_txt):
+        parsed = self._io.parse_txt_export(file_path_txt)
+
+        self.duration        = parsed['duration']
+        self.start_date      = parsed['start_date']
+        self.start_time      = parsed['start_time']
+        self.stop_date       = parsed['stop_date']
+        self.stop_time       = parsed['stop_time']
+        self.input_signals   = parsed['input_signals']
+        self.output_signals  = parsed['output_signals']
+
+        timestamp = parsed['timestamp']
+        filename_npz = os.path.join(self.data_path, f"tf_{timestamp}.npz")
+            
+        self.save_signal_to_npz(filename_npz, timestamp)
+        self.process_npz_data()
+    
+#-------------------------------------------------------------------------------
+    def save_signal_to_npz(self, filename_npz, timestamp):
+        # Prepare metadata
+        user_meta = UserMeta(self.config_path)
+        blocks = {
+            'user_info_block':     user_meta.get_user_info_block(),
+            'data_info_block':     self.get_data_info_block(),
+            'input_info_block':    self.get_input_info_block(),
+            'tf_info_block':       self.get_tf_info_block(),
+            'process_info_block':  self.get_process_info_block(),
+            'analysis_info_block': self.get_analysis_info_block(),
         }
 
-        # Step 3: Post-merged passthrough keys (appear after)
-        post_keys = [
-            "Captured Duration",
-            "Ref Channel"
-        ]
+        self._io.save_signal_to_npz(filename_npz, timestamp, blocks, self.input_signals, self.output_signals)
+        self.filename_npz = filename_npz
 
-        # Add pre keys
-        for key in pre_keys:
-            if key in meta:
-                formatted[key] = meta[key]
+#-------------------------------------------------------------------------------
+    def process_npz_data(self, filename = None, export = False):
+        filename_npz = filename if filename is not None else self.filename_npz
 
-        # Add merged keys
-        formatted.update(merged_entries)
+        loaded = self._io.load_npz(filename_npz)
 
-        # Add post keys
-        for key in post_keys:
-            if key in meta:
-                formatted[key] = meta[key]
+        timestamp            = loaded['timestamp']
+        user_info_block      = loaded['user_info_block']
+        data_info_block      = loaded['data_info_block']
+        input_info_block     = loaded['input_info_block']
+        tf_info_block        = loaded['tf_info_block']
+        process_info_block   = loaded['process_info_block']
+        analysis_info_block  = loaded['analysis_info_block']
+        input_signals         = loaded['input_signals']
+        output_signals        = loaded['output_signals']
 
-        return formatted
+        # Update post info
+        process_info_block['Processed On'] = datetime.now().strftime("%d %b %Y, %H:%M:%S") 
+        process_info_block['Input File']   = os.path.basename(filename_npz)
+
+        freq_start   = analysis_info_block['freq_start']
+        freq_stop    = analysis_info_block['freq_stop']
+        sample_rate  = analysis_info_block['sample_rate']
+        analysis_type = analysis_info_block['analysis_type']
+
+        tf_freqs, tf_vals, tf_table = self._fitter.compute_tf_from_signals(
+            input_signals, output_signals, sample_rate, freq_start, freq_stop)
+
+        # Save data in text or csv format
+        if export:
+            txt_name = os.path.join(self.data_path, f"tf_{timestamp}.txt")
+            csv_name = os.path.join(self.data_path, f"tf_{timestamp}.csv")
+            self._io.save_to_text_csv(txt_name, user_info_block, format_data_info_metadata(data_info_block),
+                                    input_info_block, tf_info_block, process_info_block, 
+                                    tf_table, csv_mode = False)
+
+            self._io.save_to_text_csv(csv_name, user_info_block, format_data_info_metadata(data_info_block),
+                                    input_info_block, tf_info_block, process_info_block, 
+                                    tf_table, csv_mode = True)
+            print(f"[INFO] Processed file: {os.path.basename(filename_npz)} for CSV and Text mode")
+            return
+        
+        pdf_name = os.path.join(self.data_path, f"tf_{timestamp}.pdf")
+        self._plotter.save_to_pdf_screen(pdf_name, data_info_block, input_info_block, tf_info_block,
+                             process_info_block, tf_freqs, tf_vals, analysis_type)
+
+        print(f"[INFO] Processed file: {os.path.basename(filename_npz)}")
 
 #-------------------------------------------------------------------------------
     def get_data_info_block(self) -> dict:
-        # Merge and return
-        # return {**system_info, **tf_info}
-        
         if get_sys_value('notch_enable'):
             notch = 'Enabled'
             notch_freq = 50.0
@@ -805,7 +880,7 @@ class TFProcessor:
         return system_info
 
 #-------------------------------------------------------------------------------
-    def process_info_block(self) -> dict:
+    def get_process_info_block(self) -> dict:
         raw_len = len(self.input_signals)
         n_fft   = 2 ** int(np.floor(np.log2(raw_len)))
 
@@ -828,7 +903,7 @@ class TFProcessor:
         return process_info_block
 
 #-------------------------------------------------------------------------------
-    def analysis_info_block(self) -> dict:
+    def get_analysis_info_block(self) -> dict:
         if get_sys_value('simulation_mode'):
             analysis_info_block = {
                 'freq_start':       self.exc.freq_start,
@@ -868,7 +943,7 @@ def create_tf_parameters(simulation: bool, n_receivers: int = 1):
         freq_list = [base_freq +    ((i - n_receivers // 2) * 2.0) for i in range(n_receivers)]
         damp_list = [base_damping + ((i - n_receivers // 2) * 0.015) for i in range(n_receivers)]
 
-        # Clamp damping to 0.2 – 0.6 range if needed
+        # Clamp damping to 0.2 – 0.8 range if needed
         damp_list = [min(max(d, 0.2), 0.8) for d in damp_list]
 
         system = SystemParams(
@@ -968,7 +1043,8 @@ class SimulatorTF:
 
         # Trim to power-of-2 for fast FFT
         n_fft = 2 ** int(np.floor(np.log2(len(input_signal))))
-        self.tf_handler.input_signals = np.array(input_signal[:n_fft])
+        input_signal = input_signal[:n_fft]  # trim in place so it matches tf_vector's length below
+        self.tf_handler.input_signals = np.array(input_signal)
 
         # Create one output per receiver
         n_receivers = len(self.sys.natural_freq)
@@ -998,25 +1074,16 @@ class SimulatorTF:
 
 #-------------------------------------------------------------------------------
 if __name__ == '__main__':
-    from common.utils.display_helpers import get_display_context
-    from common.core.path_manager import PathManager
-    from common.core.sys_config   import sys_config_init
-    # Define project-relative folders to be added to sys.path
-    USEFUL_FOLDERS = [
-        'common/core',
-        'common/utils',
-        'common/modules',
-        # Add more here as needed
-    ]
+    from vibmshared.utils.display_helpers import get_display_context
+    from vibmshared.core.path_manager import PathManager, USEFUL_FOLDERS
+    from vibmshared.core.sys_config   import sys_config_init
 
     path_mgr = PathManager(__file__, USEFUL_FOLDERS)
     sys_config_init(path_mgr)
     
-    ProductMeta.configure('VibMScope')  # or 'VibrationAnalyser', 'VibMScope', 'VibMTool'
+    ProductMeta.configure('vibmscope')  # or 'VibrationAnalyser', 'vibmscope', 'vibmtool'
     display_config = get_display_context()
 
-    # sys_config_init() # init global variables
-    
     n_receivers = get_sys_value('adc_channels') - 1 # for transfer funciton
     sys, exc = create_tf_parameters(simulation = get_sys_value("simulation_mode"), n_receivers = n_receivers)
 
@@ -1029,4 +1096,3 @@ if __name__ == '__main__':
     filename_npz = os.path.join(tf.data_path, f"tf_{timestamp}.npz")
     tf.save_signal_to_npz(filename_npz, timestamp)
     tf.process_npz_data()
-

@@ -1,0 +1,22 @@
+## 4. Controlling scope per session (Tool + shared, then Scope + shared, then all three)
+
+Two practical mechanisms:
+
+**a) Open a narrower VS Code workspace per session.** Instead of always opening `working/`, open just `working/VibMTool` as the folder, then inside the Claude Code panel/terminal add the shared folder explicitly:
+```
+claude --add-dir ../vibmshared
+```
+or, mid-session:
+```
+/add-dir ../vibmshared
+```
+That's your "VibMTool + vibmshared" session. Swap for `VibMScope` the next day the same way. This is the real lever — it's not filesystem permission, it's telling Claude Code's search tools where to bother looking, which is what actually controls tool-call (and token) volume.
+
+**b) For the final "all three together, find conflicts" pass**, open `working/` at the root and explicitly scope the *task*, not just the folder:
+> "Compare how VibMTool and VibMScope each use functions from vibmshared/. List any function that's called with different assumptions (argument meaning, units, expected state) between the two, or any place one project's usage would break if vibmshared changed to suit the other."
+
+That's a deliberately narrow, comparison-shaped prompt — it keeps Claude querying `vibmshared`'s call sites rather than re-reading both projects top to bottom.
+
+## 6. Model choice for token/time efficiency
+
+Use **Sonnet 5** for the day-to-day per-project review sessions — it's fast and cheap and this is well within its range. Save **Opus 4.8** specifically for the final cross-project conflict-finding pass, since that's the one task that genuinely benefits from stronger multi-file reasoning and where a missed conflict costs more than the extra tokens.

@@ -1,0 +1,33 @@
+# Virtual environments
+venv/
+.venv/
+.claudeignore
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Runtime-generated (not source)
+logs/
+data/
+config/
+*.log
+*.bak
+*.pyo
+*.tmp
+
+# Archives / non-project
+archive/
+_miscellaneous/
+graphify-out/
+
+# OS/editor junk
+.DS_Store
+
+# Batch files (skip for now)

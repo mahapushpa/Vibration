@@ -1,7 +1,7 @@
 import logging
-from common.core.sys_config      import get_sys_value, set_sys_value
-from common.utils.utils_helpers  import validate_sample_rate, play_audio, safe_log
-from common.modules.cmd_helpers  import read_single_param_direct, write_single_param_direct
+from vibmshared.core.sys_config      import get_sys_value, set_sys_value
+from vibmshared.utils.utils_helpers  import validate_sample_rate, play_audio, safe_log
+from vibmshared.modules.cmd_helpers  import read_single_param_direct, write_single_param_direct
 
 #-------------------------------------------------------------------------------
 def sync_to_remote(cmd_handler):
@@ -14,8 +14,8 @@ def sync_to_remote(cmd_handler):
         safe_log(None, f"Sample rate is out of bounds, got {sample_rate}", tag = "error", do_print = True)
         raise ValueError(f"Sample rate is out of bounds, got {sample_rate}")
 
-    is_corrected, corrected_rate = validate_sample_rate(sample_rate)
-    if not is_corrected:
+    already_pow2, corrected_rate = validate_sample_rate(sample_rate)
+    if not already_pow2:
         safe_log(None, f"Sample rate is not 2^n, setting {corrected_rate}", tag = "warning", do_print = True)
         success = write_single_param_direct(cmd_handler, None, 'ADC', 'SRATE', corrected_rate)
 

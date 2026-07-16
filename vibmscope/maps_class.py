@@ -221,7 +221,16 @@ class PlotManager:
 
     #---------------------------------------------------------------------------
     def insert_xtick_time_string(self):
-        time_str = datetime.now().strftime('%H:%M:%S')
+        # Use the data's own time base: hdr_handler.system_time is sourced
+        # from the remote GSN RTC when available (else the laptop clock,
+        # upstream in HeaderProcessor) — tick labels now match the recorded
+        # timestamps. datetime.now() only before any header has been parsed
+        # (system_time still 0). (DECIDED 2026-07-16.)
+        system_time = int(getattr(self.hdr_handler, 'system_time', 0) or 0)
+        if system_time > 0:
+            _, _, time_str = self.hdr_handler.get_time_string(system_time)
+        else:
+            time_str = datetime.now().strftime('%H:%M:%S')
         self.time_xtick_label.extend([time_str])
         self.aTime.set_xticklabels(self.time_xtick_label)
         
@@ -391,7 +400,7 @@ class ButtonManager:
             ("Recording On",     0, self.record_button,  'r', False),  # Ctrl+r
             ("Transmissibility", 0, self.tf_button,      't', False),  # Ctrl+t
             ("Export Data",      0, self.export_button,  'e', False),  # Ctrl+e
-            ("Clear Setting",    0, self.reset_button,   'c', False),  # Ctrl+c
+            ("Clear Setting",    1, self.reset_button,   'l', False),  # Ctrl+L ('c' freed — was double-bound with app quit [F5])
             ("Quit System",      0, self.quit_button,    'q', True),   # Ctrl+Q
         ]
         
@@ -473,7 +482,15 @@ class ButtonManager:
             if get_session_flag('record'):
                 self.record_button()  # ensure record stops
                 set_session_flag('record', False)
-                self.signal_handler.close_open_files()
+                set_session_flag('prev_record', False)
+                # [F2] close_current_file(): saves the pending partial window
+                # and writes the STOP_DATE/STOP_TIME tokens (DECIDED
+                # 2026-07-16: captured data may be unrepeatable — never
+                # discard on stop). The old close_open_files() saved nothing
+                # and left literal "{ STOP_DATE }" placeholders, which then
+                # crashed parse_txt_export() on this file. Same sequence
+                # tf_button Case 1 already uses.
+                self.signal_handler.close_current_file()
 
             set_session_flag('session', False)      # Keep before send_session_off to make composite call
 
@@ -636,7 +653,17 @@ class ButtonManager:
         reset_status_bar()
         connection = get_session_flag('connection')
         ser_port   = getattr(self.con_handler, 'serial_port', None)
-        
+
+        # Step 0: Stop recording first (if active) and close the file WITH
+        # pending partial data + STOP tokens ([F2], DECIDED 2026-07-16).
+        # Previously quit never stopped recording at all and Step 4's
+        # close_open_files() saved nothing.
+        if get_session_flag('record'):
+            self.record_button()
+            set_session_flag('record', False)
+            set_session_flag('prev_record', False)
+            self.signal_handler.close_current_file()
+
         # Step 1: Stop Session First, if it is on
         if get_session_flag('session'):
             set_session_flag('session', False) # have this before session_off command to make composite call
@@ -670,9 +697,10 @@ class ButtonManager:
             except Exception as e:
                 safe_log(None, f"Serial port close error: {e}", tag = "error", do_print = True)
 
-        # Step 4: Close the open files, while quting the program
-        self.signal_handler.close_open_files()
-        
+        # Step 4: (removed) file closing now happens in Step 0 via
+        # close_current_file() — the old close_open_files() call here wrote
+        # nothing and only printed a duplicate "Closed file" message ([F2]).
+
         # Step 5: Quit the Tkinter mainloop (without destroying Tk explicitly)
         self.parent_frame.quit()
         safe_log(None, "Application Closed.", do_print = True)
@@ -703,8 +731,12 @@ class ButtonManager:
             logging.info(f"[SYSTEM] {INI_FILE} deleted — system will reset to defaults on next launch.")
             update_status_bar("System", "Reset requested — restart required", tone="gui")
             messagebox.showinfo("Reset Complete", "System reset to defaults.\nApplication will now exit.")
+            # Close port/thread and quit the mainloop properly — os._exit()
+            # skipped serial-port cleanup (minor, 2026-07-16). Session is
+            # guaranteed off here (guard above), so quit_button's Step 0/1
+            # are no-ops and it just closes the port and quits.
+            self.quit_button()
             self.root_window.destroy()  # clean Tk exit
-            os._exit(0)  # hard exit to ensure full shutdown
 
             # messagebox.showinfo("Reset Complete", "System reset to defaults.\nPlease restart the application.")
         except Exception as e:
@@ -715,10 +747,8 @@ class ButtonManager:
 # Optional Self-Test Block
 #-------------------------------------------------------------------------------
 if __name__ == "__main__":
-    logging.basicConfig(level = logging.DEBUG)
-    root = tk.Tk()
-    from vibmscope.maps_signal import Signal
-    dummy_signal = Signal()
-    frame = AppMainFrame(root, None, None, None, None, dummy_signal)
-    frame.pack()
-    root.mainloop()
+    # NOTE (2026-07-16): stale self-test — AppMainFrame now takes 9 args and
+    # Signal() needs initialized handlers/config; this block TypeErrors if
+    # run. Kept as a placeholder; rework or delete when a real harness exists.
+    raise SystemExit("maps_class.py has no standalone self-test; run vibmscope.py")
+

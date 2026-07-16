@@ -141,19 +141,19 @@ class ButtonManager:
     #---------------------------------------------------------------------------
     def create_dropdown_buttons(self):
         if IS_ENABLED("ENABLE_SETUP_DROPDOWN"):
-            # NOTE: key 'd' collides with the "Device Setup" button shortcut —
-            # rekey this dropdown before ever enabling the flag ([T3] note).
-            self.dropdowns['d'] = create_dropdown_button(
+            # 'u' ("Data Set_u_p"): 'd' collided with the Device Setup button
+            # shortcut — rekeyed proactively so enabling the flag is safe.
+            self.dropdowns['u'] = create_dropdown_button(
                 parent=self.toolbar,
                 label="Data Setup",
-                underline_idx=0,
-                key='d', # Ctrl+D		
+                underline_idx=8,
+                key='u', # Ctrl+U
                 item_list=[
                 ("Master Setup", 0, self.master_setup_button, 'm'),
                 ("Device Setup", 0, self.device_setup_button, 'd'),
-                ("Summary",      0, self.summary_button,      's'),   
+                ("Summary",      0, self.summary_button,      's'),
             ],
-            tooltip_msg = "Ctrl+D - Select Data Setup"
+            tooltip_msg = "Ctrl+U - Select Data Setup"
             )
 
         if IS_ENABLED("ENABLE_BRD_DROPDOWN"):
@@ -199,48 +199,54 @@ class ButtonManager:
     #---------------------------------------------------------------------------
     def master_setup_button(self):
         try:
-            SetupManager(self.root_window, self.log_handler, 
+            mgr = SetupManager(self.root_window, self.log_handler,
                                 self.path_handler, setup_mode = "master")
-            
         except Exception as e:
             self.log_handler.log(f"Master Setup Error: {e}", tag = "error")
+            return
 
-        reset_status_bar()
-        update_status_bar("MASTER", "Data")
+        if getattr(mgr, 'completed', False):   # not on error/cancel/abort
+            reset_status_bar()
+            update_status_bar("MASTER", "Data")
 
     #---------------------------------------------------------------------------
     def device_setup_button(self):
         try:
-            SetupManager(self.root_window, self.log_handler, 
+            mgr = SetupManager(self.root_window, self.log_handler,
                                 self.path_handler, setup_mode = "device")
-
         except Exception as e:
             self.log_handler.log(f"Device Setup Error: {e}", tag = "error")
+            return
 
-        reset_status_bar()
-        update_status_bar("DEVICE", "Data")
+        if getattr(mgr, 'completed', False):   # not on error/cancel/abort
+            reset_status_bar()
+            update_status_bar("DEVICE", "Data")
 
     #---------------------------------------------------------------------------
     def device_program_button(self):
         try:
-            SetupManager(self.root_window, self.log_handler, 
+            mgr = SetupManager(self.root_window, self.log_handler,
                                 self.path_handler, setup_mode = "program",
                                 cmd_handler = self.cmd_handler)
         except Exception as e:
             self.log_handler.log(f"Device Build Error: {e}", tag = "error")
+            return
 
-        reset_status_bar()
-        update_status_bar("BUILD", "Device")
+        if getattr(mgr, 'completed', False):   # not on error/cancel/abort
+            reset_status_bar()
+            update_status_bar("BUILD", "Device")
 
     #---------------------------------------------------------------------------
     def summary_button(self):
         try:
-            SummaryDialog(self.root_window, self.log_handler, self.path_handler)
+            dlg = SummaryDialog(self.root_window, self.log_handler, self.path_handler)
         except Exception as e:
             self.log_handler.log(f"Summary Error: {e}", tag = "error")
-            
-        reset_status_bar()
-        update_status_bar("SUMMARY", "Prepared")
+            return
+
+        if getattr(dlg, 'completed', False):   # only when the master loaded
+            reset_status_bar()
+            update_status_bar("SUMMARY", "Prepared")
 
     #---------------------------------------------------------------------------
     def save_log_button(self):

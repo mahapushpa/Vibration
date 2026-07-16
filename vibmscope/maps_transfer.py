@@ -59,7 +59,9 @@ def format_data_info_metadata(meta):
 
     # Step 3: Post-merged passthrough keys (appear after)
     post_keys = [
-        "Captured Duration",
+        "Duration",       # [F4] producer key is "Duration" (get_data_info_block
+                          # :842) — "Captured Duration" never matched, so the
+                          # duration was silently dropped from PDF/TXT/CSV
         "Ref Channel"
     ]
 
@@ -142,7 +144,7 @@ class TFCurveFitter:
             min_peak_distance : Minimum spacing between peaks (in index)
 
         Returns:
-            estimated_order (int) = 2 x number of valid peaks (minimum 1)
+            estimated_order (int) = 2 x number of valid peaks (minimum 2)
         """
         from scipy.signal import find_peaks
         # Convert to linear scale if needed
@@ -165,7 +167,7 @@ class TFCurveFitter:
                               distance = min_peak_distance)
 
         num_resonances = len(peaks)
-        return max(2 * num_resonances, 1)  # Ensure minimum order = 1
+        return max(2 * num_resonances, 2)  # minimum order 2 — matches the 2nd-order model this feeds
 
 #-------------------------------------------------------------------------------
     def second_order_mag(self, f, omega_n, zeta):
@@ -194,11 +196,16 @@ class TFCurveFitter:
         """
         from scipy.optimize import curve_fit
         
-        if self.use_db:
-            tf_mag = 10 ** (tf_mag / 20)
-
         try:
+            # [F6] estimate_system_order() applies its OWN dB->linear
+            # conversion (same self.use_db flag) — pass it the raw values and
+            # convert only afterwards, for the curve fit. Previously both
+            # converted, so in dB mode the order estimator saw
+            # 10**(linear/20): near-flat data, wrong peak count.
             order = self.estimate_system_order(freqs, tf_mag)
+
+            if self.use_db:
+                tf_mag = 10 ** (tf_mag / 20)
             
             popt, _ = curve_fit(self.second_order_mag, freqs, tf_mag, p0 = initial_guess, maxfev = 5000)
 
@@ -321,11 +328,15 @@ class TFSignalIO:
         for line in lines[data_start_idx:]:
             line = line.strip()
             if line:
-                values = [int(v.strip()) for v in line.split(",")]
+                # [F7] float(): recordings made with time_yspan != 'CNT' are
+                # written as '%8.3f' floats — int() crashed on them with a
+                # bare ValueError. CNT files parse identically via float().
+                values = [float(v.strip()) for v in line.split(",")]
                 data_lines.append(values)
 
-        # Full array: shape = (n_samples, n_channels)
-        full_data = np.array(data_lines, dtype = np.int16)
+        # Full array: shape = (n_samples, n_channels). float32 carries int16
+        # CNT values exactly and holds the 3-decimal unit-converted values.
+        full_data = np.array(data_lines, dtype = np.float32)
 
         # Extract input/output
         input_signals  = full_data[:, 0]                     # 1D array: (n_samples,)
@@ -362,26 +373,28 @@ class TFSignalIO:
 #-------------------------------------------------------------------------------
     def load_npz(self, filename_npz):
         """Load a saved .npz capture, returning raw blocks + signals.
-        Missing user_info_block degrades to a plain string instead of raising."""
-        data = np.load(filename_npz, allow_pickle = True)
+        Missing user_info_block degrades to a plain string instead of raising.
+        with-block: np.load keeps the NpzFile handle open otherwise, which
+        locks the .npz on Windows (matters for tf/export existing-file checks)."""
+        with np.load(filename_npz, allow_pickle = True) as data:
 
-        timestamp = data.get('timestamp')
-        if 'user_info_block' in data:
-            user_info_block = data['user_info_block'].item()
-        else:
-            user_info_block = "User Information: N/A"
+            timestamp = data.get('timestamp')
+            if 'user_info_block' in data:
+                user_info_block = data['user_info_block'].item()
+            else:
+                user_info_block = "User Information: N/A"
 
-        return {
-            'timestamp':            timestamp,
-            'user_info_block':      user_info_block,
-            'data_info_block':      data['data_info_block'].item(),
-            'input_info_block':     data['input_info_block'].item(),
-            'tf_info_block':        data['tf_info_block'].item(),
-            'process_info_block':   data['process_info_block'].item(),
-            'analysis_info_block':  data['analysis_info_block'].item(),
-            'input_signals':        data['input_signals'],
-            'output_signals':       data['output_signals'],
-        }
+            return {
+                'timestamp':            timestamp,
+                'user_info_block':      user_info_block,
+                'data_info_block':      data['data_info_block'].item(),
+                'input_info_block':     data['input_info_block'].item(),
+                'tf_info_block':        data['tf_info_block'].item(),
+                'process_info_block':   data['process_info_block'].item(),
+                'analysis_info_block':  data['analysis_info_block'].item(),
+                'input_signals':        data['input_signals'],
+                'output_signals':       data['output_signals'],
+            }
 
 #-------------------------------------------------------------------------------
     def save_to_text_csv(self, file_name, user_info_block, data_info_block,
@@ -502,9 +515,12 @@ class TFReportPlotter:
         
         y_cursor = 0.98 # y axis start point
         line_spacing = 0.030
+        # [F3] labels were crossed vs save_to_text_csv(): input_info_block IS
+        # "Input Signal Information" (source/type/freq), tf_info_block IS
+        # "System Model Information" (order/damping/natural freq).
         for label, meta in [("Data Capture Information", data_info_block),
-                            ("System Model Information", input_info_block),
-                            ("Input Signal Information", tf_info_block),
+                            ("Input Signal Information", input_info_block),
+                            ("System Model Information", tf_info_block),
                             ("Processing Information", process_info_block)]:
             ax_text.text(0.0, y_cursor, "-" * 80, fontsize=8, family='monospace', transform=ax_text.transAxes)
             y_cursor -= line_spacing
@@ -882,7 +898,10 @@ class TFProcessor:
 #-------------------------------------------------------------------------------
     def get_process_info_block(self) -> dict:
         raw_len = len(self.input_signals)
-        n_fft   = 2 ** int(np.floor(np.log2(raw_len)))
+        # Report the ACTUAL FFT length: compute_tf_from_signals() uses the
+        # full raw length, not a power-of-2 trim (sim data is pre-trimmed so
+        # both agreed there; live TXT captures previously misreported).
+        n_fft   = raw_len
 
         start = self.exc.freq_start
         end   = self.exc.freq_stop
@@ -1085,10 +1104,10 @@ if __name__ == '__main__':
     display_config = get_display_context()
 
     n_receivers = get_sys_value('adc_channels') - 1 # for transfer funciton
-    sys, exc = create_tf_parameters(simulation = get_sys_value("simulation_mode"), n_receivers = n_receivers)
+    tf_system, exc = create_tf_parameters(simulation = get_sys_value("simulation_mode"), n_receivers = n_receivers)
 
-    tf  = TFProcessor(system = sys, excitation = exc, display_config = display_config)
-    sim = SimulatorTF(system = sys, excitation = exc, tf = tf)
+    tf  = TFProcessor(system = tf_system, excitation = exc, display_config = display_config)
+    sim = SimulatorTF(system = tf_system, excitation = exc, tf = tf)
 
     sim.simulate_time_data()    # Generate input and output signals for TF
     

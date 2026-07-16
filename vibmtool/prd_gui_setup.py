@@ -31,7 +31,7 @@ from vibmtool.prd_features   import IS_ENABLED
 from vibmshared.core.product_meta  import ProductMeta
 from vibmshared.modules.cmd_remote import CMD_TABLE, MODULE_ALIASES
 from vibmshared.modules.cmd_helpers import write_single_param_direct, read_single_param_direct
-from vibmshared.core.sys_config    import set_sys_value
+from vibmshared.core.sys_config    import get_sys_value, set_sys_value
 
 #-------------------------------------------------------------------------------
 # Validation constraints for serial number
@@ -92,7 +92,7 @@ class InputManager:
     """
 
     def __init__(self, config_dir = None, log_handler = None, path_handler = None, 
-                        setup_mode: str = "master", state_write: str = "True"):
+                        setup_mode: str = "master", is_new_setup: bool = True):
         
         self.config_dir  = config_dir
         self.log_handler = log_handler
@@ -113,7 +113,7 @@ class InputManager:
             self.skip_meta_keys  = META_PROGRAM_SKIP_KEYS
             self.skip_param_keys = PARAM_PROGRAM_SKIP_KEYS
             self.skip_section    = SECTION_PROGRAM_SKIP
-            self.value_state = "normal" if state_write else "readonly"  
+            self.value_state = "normal" if is_new_setup else "readonly"
 
         self.inputs: Dict[str, Dict[str, Any]] = {
             v: {} for v in PRD_INI_SECTIONS.values() if v not in self.skip_section
@@ -662,6 +662,7 @@ class SetupManager:
         self.cmd_handler  = cmd_handler
         
         self.new_setup = None
+        self.completed = False   # True once the SetupDialog actually opened
         self.config_dir  = path_handler.get_config_path()
         self._run()
 
@@ -671,12 +672,16 @@ class SetupManager:
         title = f"{self.setup_mode.replace('_', ' ').title()} Setup"
 
         if self.setup_mode == "master" or self.setup_mode == "device":
-            question = f"Do you want a NEW {title} Config?\n\nYes = New\nNo  = Edit existing"
+            question = f"Do you want a NEW {title} Config?\n\nYes = New\nNo  = Edit existing\nCancel = Abort"
 
         else: # program mode
-            question = f"Do you want Program from?\n\nYes = Defaults\nNo  = Device INI"
+            question = f"Do you want Program from?\n\nYes = Defaults\nNo  = Device INI\nCancel = Abort"
             
-        self.new_setup = messagebox.askyesno(
+        # askyesnocancel: returns None on Cancel/window-X, making the branch
+        # below LIVE — askyesno could only return True/False, so the None
+        # check was dead and there was no way to back out of this prompt
+        # (the branch's evident original intent was a real cancel path).
+        self.new_setup = messagebox.askyesnocancel(
             title,
             question,
         )
@@ -714,7 +719,7 @@ class SetupManager:
                 self.log_handler.log(f"Edit {title} cancelled.", tag="warn")
                 return
 
-        SetupDialog(
+        dialog = SetupDialog(
             self.parent,
             self.log_handler,
             self.path_handler,
@@ -723,6 +728,9 @@ class SetupManager:
             setup_path,
             self.new_setup,
         )
+        # SetupDialog can abort before creating its window (e.g. [T4]
+        # cancelled serial prompt) — only then is .opened left False.
+        self.completed = getattr(dialog, 'opened', False)
 
 #-------------------------------------------------------------------------------
 # Class: SetupDialog
@@ -744,13 +752,14 @@ class SetupDialog:
         self.setup_path   = setup_path
         self.new_setup    = new_setup
         self.config_dir   = path_handler.get_config_path()
+        self.opened       = False   # set True once the Toplevel is created
 
         self.select_all_state = tk.BooleanVar(value=True)
  
         # Unified data object -------------------------------------------
         self.im = InputManager(config_dir = self.config_dir,
                                 log_handler = self.log_handler, path_handler = self.path_handler,
-                                setup_mode = self.setup_mode, state_write = self.new_setup)
+                                setup_mode = self.setup_mode, is_new_setup = self.new_setup)
         
         prefix = self.setup_mode.replace("_", " ").title()
 
@@ -797,6 +806,7 @@ class SetupDialog:
         
         # TK window ------------------------------------------------------
         self.window = tk.Toplevel(self.parent)
+        self.opened = True
         ProductMeta.set_icon(self.window)
         self.window.title(f"{prefix} Setup")
         self.window.geometry("800x400")
@@ -915,7 +925,8 @@ class SetupDialog:
         ok, serial_no = self._get_serial_from_widget()
         if not ok:
             return
-        set_sys_value("sys_ser_no", serial_no)
+        if get_sys_value("sys_ser_no") != serial_no:   # full INI rewrite only on change
+            set_sys_value("sys_ser_no", serial_no)
         
         for flat_key, entry in self.im.program_widgets.items():
             if entry["select"].get():
@@ -934,7 +945,8 @@ class SetupDialog:
         ok, serial_no = self._get_serial_from_widget()
         if not ok:
             return
-        set_sys_value("sys_ser_no", serial_no)
+        if get_sys_value("sys_ser_no") != serial_no:   # full INI rewrite only on change
+            set_sys_value("sys_ser_no", serial_no)
         
         for flat_key, entry in self.im.program_widgets.items():
             if entry["select"].get():
@@ -952,7 +964,8 @@ class SetupDialog:
         ok, serial_no = self._get_serial_from_widget()
         if not ok:
             return
-        set_sys_value("sys_ser_no", serial_no)
+        if get_sys_value("sys_ser_no") != serial_no:   # full INI rewrite only on change
+            set_sys_value("sys_ser_no", serial_no)
 
         self.im.verification_results = {}  # Clear old results
 
@@ -1110,6 +1123,7 @@ class SummaryDialog:
         self.client_info = {}
         self.export_file = None
         self.displayed_serials = set()   # exists even if load_master_file() fails
+        self.completed = False           # True once the master loaded cleanly
         self.start()
 
     #---------------------------------------------------------------------------
@@ -1126,7 +1140,7 @@ class SummaryDialog:
             return
 
         self._init_ui()
-        self.load_master_file(self.master_file)
+        self.completed = self.load_master_file(self.master_file)
 
     #---------------------------------------------------------------------------
     def _init_ui(self):
@@ -1218,8 +1232,11 @@ class SummaryDialog:
             # Extract client and device info
             self.client_info = self.master_inputs.get("client_info", {})
             self.device_info = self.master_inputs.get("device_info", {})
-            client   = self.client_info.get("client", "unknown").title()
-            order_id = self.client_info.get("order_id", "0000")
+            # str() guard — [T6] gap: this site was missed in the Phase-1
+            # consumer fixes; a purely-numeric client name crashed the whole
+            # summary load via the outer except.
+            client   = str(self.client_info.get("client", "unknown")).title()
+            order_id = str(self.client_info.get("order_id", "0000"))
 
             # Update GUI and log
             self.hdr_label.config(text=f"Loaded Master: {client} - Order ID: {order_id}")
@@ -1291,9 +1308,12 @@ class SummaryDialog:
                         self.tree.insert("", "end", values=(sn, "extra", created, "Yes"))
                         self.displayed_serials.add((sn, "extra", created, "Yes"))
 
+            return True
+
         except Exception as e:
             self.log_handler.log(f"Failed to load master file: {e}", tag="error")
             messagebox.showerror("Error", f"Could not load Master file:\n{e}")
+            return False
 
     #---------------------------------------------------------------------------
     def export_text(self):

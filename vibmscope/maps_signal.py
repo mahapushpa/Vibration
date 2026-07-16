@@ -54,8 +54,7 @@ class Signal:
         # Data buffers
         self.all_fragments_rcvd  = False
         self.samples_in_fragment = get_sys_value('adc_fragment')
-        self.sensor_factor = get_sensor_unit_factor(get_sys_value('time_yspan'))
-       
+
         self.clear_signal_buffers()
 
     #---------------------------------------------------------------------------
@@ -90,6 +89,17 @@ class Signal:
         # Compute offset in row based on fragment index
         start = frag_no * self.samples_in_fragment
         end   = start + self.samples_in_fragment
+
+        # [F9] Dropped-fragment resync: if this (ch, fragment) slot is already
+        # marked received but the second never completed, at least one other
+        # fragment was lost upstream (queue-full drop — see the serial_comm
+        # WARN added in Phase 0). Discard the stale, incomplete second and
+        # start re-assembling from this fragment, instead of silently mixing
+        # two different seconds in one plot/record cycle.
+        if self.fragment_received[ch, frag_no]:
+            safe_log(None, "[Signal] Incomplete second discarded (dropped fragment detected) — resyncing",
+                     tag = "warning", do_print = True)
+            self.fragment_received[:, :] = False
 
         self.fragment_buffer[ch, start:end] = ydata[:self.samples_in_fragment] # avoid extra
         # safe_log(None, f"[Insert] CH = {ch}, FRAG = {frag_no}, start = {start}, end = {end}", tag = "debug", do_print = True)
@@ -146,8 +156,15 @@ class Signal:
             self.open_new_record_file(file_str, date_str, time_str, current_hour)
             
         elif self.record_start_hour != current_hour:  # Hour Rollover
-            self.close_current_file()
+            # [F8] The just-completed second already sits in t_ydata and
+            # belongs to the NEW hour: close the old file EXCLUDING it, then
+            # count it as the new file's first second — mirroring the
+            # first-time branch above. Previously that second was written
+            # into the OLD hour's file while the oldest pending old-hour
+            # second fell out of the partial slice (~1 s misfiled per hour).
+            self.close_current_file(exclude_latest_second = True)
             self.open_new_record_file(file_str, date_str, time_str, current_hour)
+            self.record_second_counter = 1  # current (new-hour) second already captured
             
         else: # every 5 seconds
             self.save_full_window_data()
@@ -277,20 +294,12 @@ class Signal:
         return True
         
     #---------------------------------------------------------------------------
-    def close_current_file(self):
-        """Dummy closer now that we use 'with open()' for all writes. It is just message function now"""
+    def close_current_file(self, exclude_latest_second = False):
+        """Save pending partial data (optionally excluding the newest second —
+        hour-rollover path, [F8]), write the STOP tokens, and log the close."""
         if self.record_filename:
-            self.save_partial_window_data()
+            self.save_partial_window_data(exclude_latest_second)
             self.insert_closing_time() # update metadata for stop date and time
-            rel_path = self.path_handler.get_relative_path(self.record_filename)
-            print(f"[Recording] Closed file: {rel_path}")
-            logging.info(f"[Recording] Closed file: {rel_path}")
-            #self.record_filename = None
-
-    #---------------------------------------------------------------------------
-    def close_open_files(self):
-        """No file handles to close; all file writes are done via 'with open()'."""
-        if self.record_filename:
             rel_path = self.path_handler.get_relative_path(self.record_filename)
             print(f"[Recording] Closed file: {rel_path}")
             logging.info(f"[Recording] Closed file: {rel_path}")
@@ -366,10 +375,17 @@ class Signal:
             return True
             
     #---------------------------------------------------------------------------
-    def save_partial_window_data(self):
+    def save_partial_window_data(self, exclude_latest_second = False):
         if self.record_second_counter > 0:
-            partial_samples = get_sys_value('adc_srate') * self.record_second_counter
-            trimmed_data = [np.array(ch)[-partial_samples:] for ch in self.t_ydata]
+            srate = get_sys_value('adc_srate')
+            partial_samples = srate * self.record_second_counter
+            if exclude_latest_second:
+                # [F8] hour rollover: the newest second in t_ydata belongs to
+                # the NEW hour — write only the pending old-hour seconds
+                # (the `counter` seconds immediately BEFORE the newest one).
+                trimmed_data = [np.array(ch)[-(partial_samples + srate):-srate] for ch in self.t_ydata]
+            else:
+                trimmed_data = [np.array(ch)[-partial_samples:] for ch in self.t_ydata]
             if not self.file_handler.write_data(self.record_filename, trimmed_data):
                 safe_log(None, f"Data write failed for {self.record_filename} (metadata was written)", tag = "error", do_print = True)
                 return False
@@ -391,8 +407,13 @@ class Signal:
     #---------------------------------------------------------------------------
     def ydata_to_unit(self, ydata):
         """ convert the y axis data based on unit selected."""
-        unit = get_sys_value('time_yspan')
-        return (np.int16(ydata * self.sensor_factor))
+        # Factor recomputed per call (cheap lookup) so a unit changed while
+        # the session is OFF takes effect on the next session — the old
+        # __init__-cached factor went stale (DECIDED 2026-07-16: unit changes
+        # are permitted in session-off only). np.clip saturates instead of
+        # letting np.int16 silently wrap for factors > 1.
+        factor = get_sensor_unit_factor(get_sys_value('time_yspan'))
+        return np.int16(np.clip(ydata * factor, -32768, 32767))
             
         # elif unit == 'VEL':   # the display unit is Velocity, convert in adc count to mm/Sec
             # return (ydata * ADCConfig.adc_vel_in_bit)

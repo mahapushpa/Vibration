@@ -358,3 +358,32 @@ input unchanged).
   plus the minor-block items marked (shared): dropdown leading
   separator / unused per-item shortcut, StatusBarHandler dead style_dict,
   ConfigIO latent traps.
+
+## Phase 3 closeout (2026-07-16 — deferred-minors dispositioned)
+1. FIXED: status bar now reflects real setup/summary outcome (SetupManager
+   .completed / SetupDialog.opened / SummaryDialog.completed) — the
+   toolbar buttons update the status bar only on completion, not on
+   error/cancel/abort. Closes the "STILL OPEN" minor above.
+2. FIXED: mode prompt is askyesnocancel — dead None-branch now live, real
+   Cancel added (window-X now cancels instead of meaning No/Edit); the two
+   question strings advertise "Cancel = Abort".
+3. FIXED: sys_ser_no written only on change (get_sys_value guard) — was a
+   full INI rewrite per Write/Read/Verify click.
+4. FIXED: prd_features.py header + booleans; GLB_VALID/GLB_INVALID removed.
+5. FIXED: state_write -> is_new_setup (plus the str-default "True"
+   truthiness trap: bool default now).
+6. FIXED: dead self.running removed (vibmtool.py); Data Setup dropdown
+   rekeyed 'd' -> 'u' (Ctrl+U, "Data Set_u_p"), collision note dropped;
+   flag stays disabled.
+7. FIXED ([T6] straggler): load_master_file() client/order_id str() guards
+   — the site missed by the Phase-1 consumer fixes.
+8. CLOSED-ACCEPTED (2026-07-16, do not re-raise):
+   - InputManager / self.im naming: kept — grep-friendly, rename churn
+     across every call site outweighs the readability gain.
+   - MainApp name ambiguity: kept — ProductMeta window titles and per-tool
+     log files already disambiguate at runtime.
+   - Synchronous command GUI freeze during long Write & Verify runs:
+     accepted architecture limitation of the single-threaded design;
+     revisit only if operators report it (cheap mitigation then: busy
+     cursor + update_idletasks around the loops, or a worker thread as a
+     larger change).

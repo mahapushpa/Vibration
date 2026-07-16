@@ -303,4 +303,25 @@ because VibMScope is the affected consumer.
   disagree) [FIXED 2026-07-16: 'barlett' -> 'bartlett', see root CLAUDE.md];
   (b) serial_comm.py SerialReader queue-full silent drop —
   the shared half of [F9] above.
-  
+
+## Phase 3 closeout (2026-07-16 — deferred-minors dispositioned)
+1. CLOSED (2026-07-16, owner decision): dB-mode FFT axis — FFT dB values are
+   always positive at this product's signal levels; the abs() guard already
+   prevents axis inversion. No dB-axis rework planned. (Do not re-raise.)
+2. FIXED: x-tick labels now follow hdr_handler.system_time (RTC-preferred,
+   laptop fallback) — DECIDED 2026-07-16. (maps_class.py
+   insert_xtick_time_string())
+3. FIXED: ydata_to_unit() per-call factor + int16 saturation (np.clip);
+   DECIDED: unit changes permitted in session-OFF only (the rule itself is
+   the record). (maps_signal.py)
+4. FIXED/REMOVED: close_open_files() deleted (caller-less since [F2]).
+   (maps_signal.py)
+5. FIXED (2026-07-16): maps_class __main__ self-test — the old testing
+   statements were removed on prior suggestion, leaving an empty
+   `if __name__ == "__main__":` body (a hard SyntaxError that made the
+   module unimportable). Added a `raise SystemExit(...)` statement as the
+   block body so the file compiles and, if run directly, prints a clear
+   "run vibmscope.py instead" message. Rework into a real harness later.
+6. vib_features.py header + boolean cleanup noted (consistency with
+   prd_features.py; zero external GLB_ importers — GLB_VALID/GLB_INVALID
+   removed).

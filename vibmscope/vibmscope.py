@@ -117,9 +117,11 @@ class MainApp:
         # Ensure proper cleanup on window close
         self.root.protocol("WM_DELETE_WINDOW", self.stop)
 
-        # Bind Ctrl+C/c in GUI to close the window
-        self.root.bind_all("<Control-c>", lambda e: self.stop())
-        self.root.bind_all("<Control-C>", lambda e: self.stop())
+        # [F5] Ctrl+C bindings removed: they double-fired with the toolbar
+        # "Clear Setting" shortcut (root and 'all' bindtags both ran — reset
+        # dialog AND app shutdown from one keypress). Quit remains on Ctrl+Q,
+        # the window X, and SIGINT/SIGTERM; Ctrl+C is left free for
+        # conventional copy, matching VibMTool.
 
         self.root.deiconify()  # Show the window after initialization
 

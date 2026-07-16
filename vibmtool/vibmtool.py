@@ -39,7 +39,6 @@ class MainApp:
         self.root = tk.Tk()
         set_widget_style()
         self.root.iconify()   # Start with the window minimized
-        self.running = True   # Flag to track application state
 
         # initialization available connecction
         if get_sys_value('simulation_mode'):
@@ -109,7 +108,6 @@ class MainApp:
 #-------------------------------------------------------------------------------
     def stop(self, *args):
         """Gracefully exit the application."""
-        self.running = False
 
         # Route through quit_button() so the serial port is closed on ALL
         # exit paths (window X, SIGINT/SIGTERM), not just Ctrl+Q — same

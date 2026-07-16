@@ -271,4 +271,15 @@ so git is being handled by the user, not in-session.
   analysis_info_block -> get_* (npz string keys unchanged); PROGAM_KEY_TOOLTIPS
   -> PROGRAM_KEY_TOOLTIPS; sys_config log strings (maps_sys.ini ->
   sys_config.ini, missing f-string). See per-project CLAUDE.md for the rest.
-  
+
+## Phase 3 closeout (2026-07-16)
+- The 2026-07-16 review backlog is now fully dispositioned across both
+  projects (each remaining minor either FIXED or explicitly CLOSED-ACCEPTED
+  — see the Phase 3 closeout sections in VibMScope/CLAUDE.md and
+  VibMTool/CLAUDE.md). One item remains intentionally OPEN: event-capture
+  wiring (parked by owner).
+- FIXED (2026-07-16): VibMScope maps_class.py __main__ block — prior
+  removal of its test statements left an empty `if __name__ == "__main__":`
+  body (SyntaxError, module unimportable). A `raise SystemExit(...)` body
+  was added so the file compiles; rework into a real harness later.
+

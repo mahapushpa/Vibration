@@ -26,6 +26,7 @@ config/
 archive/
 _miscellaneous/
 graphify-out/
+.claude/
 
 # OS/editor junk
 .DS_Store

@@ -63,6 +63,7 @@ class AppMainFrame(tk.Frame):
             display_config = self.display_config,
             signal_handler = self.signal_handler, 
             tf_handler     = self.tf_handler,
+            hdr_handler    = self.hdr_handler,
         )
         
         self.buttons = ButtonManager(
@@ -79,11 +80,12 @@ class AppMainFrame(tk.Frame):
 #-------------------------------------------------------------------------------
 class PlotManager:
     """Manages all plot axes, styling, and update logic."""
-    def __init__(self, parent_frame, display_config, signal_handler, tf_handler):
+    def __init__(self, parent_frame, display_config, signal_handler, tf_handler, hdr_handler):
         self.parent_frame = parent_frame
         self.display_config = display_config
         self.signal_handler = signal_handler
         self.tf_handler   = tf_handler
+        self.hdr_handler = hdr_handler
         self.time_xtick_label = None 
         self.init_plots()
 

@@ -59,7 +59,7 @@ default_RemoteParameters = {
     'adc_srate'     : 1024,
     'adc_msrate'    : 8192,
     'adc_fragment'  : 1024,    # in words
-    'adc_channels'   : 2,
+    'adc_channels'   : 5,
     'adc_notch'     : False,
     'adc_e_level'   : 1000,    # adc counts
     

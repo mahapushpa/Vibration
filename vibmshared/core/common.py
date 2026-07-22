@@ -31,6 +31,7 @@ SessionParameters = {
     'cmd_waiting'   : False,    # Waiting reply from remote
     'connection'    : None,     # Connected to simulation_mode or Remote live mode
     'event'         : True,     # Event detection is on or off
+    'pause'         : False,    # Screen pause on or off
 }
 
 #-------------------------------------------------------------------------------

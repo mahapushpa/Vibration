@@ -128,14 +128,16 @@ class PlotManager:
 
     #---------------------------------------------------------------------------
     def update_plots_axes(self):
-        try:
-            self.insert_xtick_time_string()
-            self.update_time_axes()
-            self.update_frequency_axes()
-        except Exception as e:
-            print(f"[EXCEPTION] Plot update failed: {e}")
-            logging.error(f"Plot update failed: {e}")
-            logging.debug(traceback.format_exc())
+        # if pause is off, update display
+        if not get_session_flag('pause'):
+            try:
+                self.insert_xtick_time_string()
+                self.update_time_axes()
+                self.update_frequency_axes()
+            except Exception as e:
+                print(f"[EXCEPTION] Plot update failed: {e}")
+                logging.error(f"Plot update failed: {e}")
+                logging.debug(traceback.format_exc())
 
     #---------------------------------------------------------------------------
     def update_time_axes(self):
@@ -400,11 +402,12 @@ class ButtonManager:
 		       # label,        u_idx, function,     shortcut, align_right
             ("Session On",       0, self.session_button, 's', False),  # Ctrl+s
             ("Recording On",     0, self.record_button,  'r', False),  # Ctrl+r
+            ("Event Rec On",     1, self.event_button,   'v', False),  # Ctrl+v
+            ("Screen Pause",     7, self.pause_button,   'p', False),  # Ctrl+p
             ("Transmissibility", 0, self.tf_button,      't', False),  # Ctrl+t
             ("Export Data",      0, self.export_button,  'e', False),  # Ctrl+e
             ("Clear Setting",    1, self.reset_button,   'l', False),  # Ctrl+L ('c' freed — was double-bound with app quit [F5])
             ("Quit System",      0, self.quit_button,    'q', True),   # Ctrl+Q
-            ("Event Rec On",     1, self.event_button,   'v', False),  # Ctrl+v
         ]
         
         # One-liner: build all buttons and keep the dict
@@ -500,6 +503,11 @@ class ButtonManager:
                 self.event_button()  # ensure event recording stops
                 set_session_flag('event', False)
 
+            # Remove Pause if Active
+            if get_session_flag('pause'):
+                self.pause_button()  # ensure pause is cleared
+                set_session_flag('pause', False)
+
             set_session_flag('session', False)      # Keep before send_session_off to make composite call
 
             # Stop the background SerialReader thread FIRST, before issuing the
@@ -580,6 +588,25 @@ class ButtonManager:
             self.buttons['v'].config(text = "Event Rec On", relief = "raised")
             
         print(f"Event Recording : {'Started' if toggle else 'Stopped'}")
+
+#-------------------------------------------------------------------------------
+    def pause_button(self):
+        """Toggles screen update state and updates button label/state."""
+        if not get_session_flag('session'):
+            print("[INFO] Nothing to Pause, session is not running.")
+            return False
+
+        toggle = not get_session_flag('pause')
+        set_session_flag('pause', toggle)
+        
+        if toggle:
+            update_status_bar("Pause", "ON", tone = 'gui')
+            self.buttons['p'].config(text = "Screen Update", relief = "sunken")
+        else:
+            update_status_bar("Pause", remove = True)
+            self.buttons['p'].config(text = "Screen Pause", relief = "raised")
+            
+        print(f"[INFO] Screen {'Paused' if toggle else 'Running'}")
 
 #-------------------------------------------------------------------------------
     def tf_button(self):

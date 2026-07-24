@@ -628,7 +628,7 @@ class ButtonManager:
         
         # Case 2 + 3: Session OFF — let the user choose either .npz or .txt
         filename = filedialog.askopenfilename(
-            title="Select TF Data File (.npz or .txt)",
+            title="Select TF Input Data File (.npz or .txt)",
             # Let one filter show both; also list each explicitly for convenience
             filetypes=[
                 ("TF data files", ("*.npz", "*.txt")),

@@ -123,6 +123,11 @@ BUTTON_TOOLTIPS = {
     'l': "Clear logs from the log window",
     'g': "Save logs to specified file",
     'q': "Exit the application",
+    'e': "Export npz file to txt & csv",
+    't': "Draw Transmisibility from npz/txt",
+    'p': "Pause or resume the live screen updates",
+    'r': "Start or stop continuous data recording",
+    'v': "Toggle automatic capture of vibration events"
 }
 
 # ------ SETUP Redraw as per needed Size ---------------------------
@@ -221,7 +226,8 @@ def create_simple_button(toolbar, definition, tooltip=True):
 
     if tooltip:
         try:
-            btn.tooltip = Tooltip(btn, f"Ctrl+{key.upper()} - {label}")
+            hint = BUTTON_TOOLTIPS.get(key.lower(), label)
+            btn.tooltip = Tooltip(btn, f"Ctrl+{key.upper()} - {hint}")
         except ImportError:
             pass
 

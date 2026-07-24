@@ -414,9 +414,13 @@ class ButtonManager:
         # self.buttons = create_simple_button_all(self.toolbar, self.button_definitions)
         
         for definition in self.button_definitions:
-            # label = definition[0]
-            # if label == "Export Data":  # EXAMPLE condition to skip
-                # continue
+            label = definition[0]
+            
+            if label == "Transmissibility" and not IS_ENABLED("ENABLE_TF_BTN"):
+                continue
+            if label == "Export Data" and not IS_ENABLED("ENABLE_EXPORT_TF_DATA_BTN"):
+                continue
+                
             btn = create_simple_button(self.toolbar, definition)
             self.buttons[definition[3].lower()] = btn  # key is shortcut
         

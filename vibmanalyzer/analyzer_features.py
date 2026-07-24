@@ -9,6 +9,8 @@ FEATURE_FLAGS = {
     "ENABLE_SYS_DROPDOWN"   : False,
 
     "ENABLE_BUILD_TOP_BUTTON" : False,
+    "ENABLE_TF_BTN" : False,
+    "ENABLE_EXPORT_TF_DATA_BTN"      : True,
 
     # Add more as needed
 }

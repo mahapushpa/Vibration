@@ -14,7 +14,7 @@ from matplotlib.ticker import FixedLocator, AutoMinorLocator
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 #-------------------------------------------------------------------------------
-from vib_features     import IS_ENABLED
+from analyzer_features              import IS_ENABLED
 from vibmshared.core.parameters     import PlotParams
 from vibmshared.core.sys_config     import get_sys_value, INI_FILE
 from vibmshared.core.serial_comm    import ConnectionThreadManager

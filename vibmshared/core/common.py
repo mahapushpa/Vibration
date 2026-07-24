@@ -31,6 +31,7 @@ SessionParameters = {
     'cmd_waiting'   : False,    # Waiting reply from remote
     'connection'    : None,     # Connected to simulation_mode or Remote live mode
     'event'         : True,     # Event detection is on or off
+    'pause'         : False,    # Screen pause on or off
 }
 
 #-------------------------------------------------------------------------------
@@ -59,7 +60,7 @@ default_RemoteParameters = {
     'adc_srate'     : 1024,
     'adc_msrate'    : 8192,
     'adc_fragment'  : 1024,    # in words
-    'adc_channels'   : 2,
+    'adc_channels'   : 5,
     'adc_notch'     : False,
     'adc_e_level'   : 1000,    # adc counts
     

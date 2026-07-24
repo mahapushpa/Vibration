@@ -1,4 +1,4 @@
-# prd_features.py
+# tool_features.py
 
 FEATURE_FLAGS = {
     "ENABLE_EXTRA_DEVICE"   : False,

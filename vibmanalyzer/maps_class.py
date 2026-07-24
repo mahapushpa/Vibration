@@ -14,7 +14,7 @@ from matplotlib.ticker import FixedLocator, AutoMinorLocator
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 #-------------------------------------------------------------------------------
-from scope_features                 import IS_ENABLED
+from analyzer_features              import IS_ENABLED
 from vibmshared.core.parameters     import PlotParams
 from vibmshared.core.sys_config     import get_sys_value, INI_FILE
 from vibmshared.core.serial_comm    import ConnectionThreadManager
@@ -128,14 +128,16 @@ class PlotManager:
 
     #---------------------------------------------------------------------------
     def update_plots_axes(self):
-        try:
-            self.insert_xtick_time_string()
-            self.update_time_axes()
-            self.update_frequency_axes()
-        except Exception as e:
-            print(f"[EXCEPTION] Plot update failed: {e}")
-            logging.error(f"Plot update failed: {e}")
-            logging.debug(traceback.format_exc())
+        # if pause is off, update display
+        if not get_session_flag('pause'):
+            try:
+                self.insert_xtick_time_string()
+                self.update_time_axes()
+                self.update_frequency_axes()
+            except Exception as e:
+                print(f"[EXCEPTION] Plot update failed: {e}")
+                logging.error(f"Plot update failed: {e}")
+                logging.debug(traceback.format_exc())
 
     #---------------------------------------------------------------------------
     def update_time_axes(self):
@@ -391,7 +393,7 @@ class ButtonManager:
         self.dropdowns = {}
 		        
         self.create_simple_buttons()
-        # self.create_dropdown_buttons()
+        self.create_dropdown_buttons()
         self.bind_all()
 
     #---------------------------------------------------------------------------
@@ -400,6 +402,8 @@ class ButtonManager:
 		       # label,        u_idx, function,     shortcut, align_right
             ("Session On",       0, self.session_button, 's', False),  # Ctrl+s
             ("Recording On",     0, self.record_button,  'r', False),  # Ctrl+r
+            ("Event Rec On",     1, self.event_button,   'v', False),  # Ctrl+v
+            ("Screen Pause",     7, self.pause_button,   'p', False),  # Ctrl+p
             ("Transmissibility", 0, self.tf_button,      't', False),  # Ctrl+t
             ("Export Data",      0, self.export_button,  'e', False),  # Ctrl+e
             ("Clear Setting",    1, self.reset_button,   'l', False),  # Ctrl+L ('c' freed — was double-bound with app quit [F5])
@@ -410,9 +414,13 @@ class ButtonManager:
         # self.buttons = create_simple_button_all(self.toolbar, self.button_definitions)
         
         for definition in self.button_definitions:
-            # label = definition[0]
-            # if label == "Export Data":  # EXAMPLE condition to skip
-                # continue
+            label = definition[0]
+            
+            if label == "Transmissibility" and not IS_ENABLED("ENABLE_TF_BTN"):
+                continue
+            if label == "Export Data" and not IS_ENABLED("ENABLE_EXPORT_TF_DATA_BTN"):
+                continue
+                
             btn = create_simple_button(self.toolbar, definition)
             self.buttons[definition[3].lower()] = btn  # key is shortcut
         
@@ -494,6 +502,16 @@ class ButtonManager:
                 # tf_button Case 1 already uses.
                 self.signal_handler.close_current_file()
 
+            # Stop Event Recording if Active
+            if get_session_flag('event'):
+                self.event_button()  # ensure event recording stops
+                set_session_flag('event', False)
+
+            # Remove Pause if Active
+            if get_session_flag('pause'):
+                self.pause_button()  # ensure pause is cleared
+                set_session_flag('pause', False)
+
             set_session_flag('session', False)      # Keep before send_session_off to make composite call
 
             # Stop the background SerialReader thread FIRST, before issuing the
@@ -557,6 +575,44 @@ class ButtonManager:
         print(f"Data Recording : {'Started' if toggle else 'Stopped'}")
 
 #-------------------------------------------------------------------------------
+    def event_button(self):
+        """Toggles event recording state and updates button label/state."""
+        if not get_session_flag('session'):
+            print("[INFO] Session is not running.")
+            return False
+
+        toggle = not get_session_flag('event')
+        set_session_flag('event', toggle)
+        
+        if toggle:
+            update_status_bar("Event", "ON", tone = 'gui')
+            self.buttons['v'].config(text = "Event Rec Off", relief = "sunken")
+        else:
+            update_status_bar("Event", remove = True)
+            self.buttons['v'].config(text = "Event Rec On", relief = "raised")
+            
+        print(f"Event Recording : {'Started' if toggle else 'Stopped'}")
+
+#-------------------------------------------------------------------------------
+    def pause_button(self):
+        """Toggles screen update state and updates button label/state."""
+        if not get_session_flag('session'):
+            print("[INFO] Nothing to Pause, session is not running.")
+            return False
+
+        toggle = not get_session_flag('pause')
+        set_session_flag('pause', toggle)
+        
+        if toggle:
+            update_status_bar("Pause", "ON", tone = 'gui')
+            self.buttons['p'].config(text = "Screen Update", relief = "sunken")
+        else:
+            update_status_bar("Pause", remove = True)
+            self.buttons['p'].config(text = "Screen Pause", relief = "raised")
+            
+        print(f"[INFO] Screen {'Paused' if toggle else 'Running'}")
+
+#-------------------------------------------------------------------------------
     def tf_button(self):
         """
         Transfer Function button handler:
@@ -576,7 +632,7 @@ class ButtonManager:
         
         # Case 2 + 3: Session OFF — let the user choose either .npz or .txt
         filename = filedialog.askopenfilename(
-            title="Select TF Data File (.npz or .txt)",
+            title="Select TF Input Data File (.npz or .txt)",
             # Let one filter show both; also list each explicitly for convenience
             filetypes=[
                 ("TF data files", ("*.npz", "*.txt")),

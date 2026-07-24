@@ -1,4 +1,4 @@
-# vib_features.py
+# scope_features.py
 
 FEATURE_FLAGS = {
     "ENABLE_EXTRA_DEVICE"   : False,

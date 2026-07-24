@@ -10,8 +10,8 @@ from   functools import partial
 from   datetime import datetime
 
 #-------------------------------------------------------------------------------
-from vibmtool.prd_features    import IS_ENABLED
-from vibmtool.prd_gui_setup   import SetupManager, SummaryDialog
+from tool_features    import IS_ENABLED
+from prd_gui_setup   import SetupManager, SummaryDialog
 from vibmshared.core.common   import get_session_flag
 from vibmshared.modules.cmd_helpers import write_module_direct, read_module_direct
 

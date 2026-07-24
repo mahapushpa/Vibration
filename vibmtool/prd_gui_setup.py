@@ -23,11 +23,11 @@ from datetime  import datetime
 from typing    import Any, Dict
 from tkinter   import ttk, messagebox, filedialog, simpledialog
 
-from vibmtool.prd_gui_meta   import *
+from prd_gui_meta   import *
 from vibmshared.utils.gui_utils    import *
 from vibmshared.utils.utils_helpers import *
 from vibmshared.utils.config_io    import ConfigIO
-from vibmtool.prd_features   import IS_ENABLED
+from tool_features   import IS_ENABLED
 from vibmshared.core.product_meta  import ProductMeta
 from vibmshared.modules.cmd_remote import CMD_TABLE, MODULE_ALIASES
 from vibmshared.modules.cmd_helpers import write_single_param_direct, read_single_param_direct
